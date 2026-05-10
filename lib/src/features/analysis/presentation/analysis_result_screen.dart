@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:smart_wrong_notebook/src/app/providers.dart';
+import 'package:smart_wrong_notebook/src/domain/models/analysis_result.dart';
 import 'package:smart_wrong_notebook/src/domain/models/mastery_level.dart';
 import 'package:smart_wrong_notebook/src/domain/models/question_record.dart';
 import 'package:smart_wrong_notebook/src/domain/models/question_split_result.dart';
@@ -314,20 +315,49 @@ class _AnalysisResultScreenState extends ConsumerState<AnalysisResultScreen> {
             const SizedBox(height: 10),
             // Answer
             _SectionCard(
-              icon: CupertinoIcons.checkmark_circle,
-              iconColor: const Color(0xFF16A34A),
-              bg: const Color(0xFFF0FDF4),
-              border: const Color(0xFFBBF7D0),
-              title: '正确解答',
-              titleColor: const Color(0xFF166534),
-              contentWidget: MathContentView(
-                displayResult.finalAnswer,
-                style: TextStyle(
-                    fontSize: 14,
-                    color: isDark
-                        ? colorScheme.onSurface
-                        : const Color(0xFF15803D),
-                    fontWeight: FontWeight.w600),
+              icon: displayResult.visualAssumptionStatus ==
+                      VisualAssumptionStatus.needsReview
+                  ? CupertinoIcons.exclamationmark_triangle
+                  : CupertinoIcons.checkmark_circle,
+              iconColor: displayResult.visualAssumptionStatus ==
+                      VisualAssumptionStatus.needsReview
+                  ? const Color(0xFFEA580C)
+                  : const Color(0xFF16A34A),
+              bg: displayResult.visualAssumptionStatus ==
+                      VisualAssumptionStatus.needsReview
+                  ? const Color(0xFFFFF7ED)
+                  : const Color(0xFFF0FDF4),
+              border: displayResult.visualAssumptionStatus ==
+                      VisualAssumptionStatus.needsReview
+                  ? const Color(0xFFFED7AA)
+                  : const Color(0xFFBBF7D0),
+              title: displayResult.visualAssumptionStatus ==
+                      VisualAssumptionStatus.needsReview
+                  ? '可能解法'
+                  : '正确解答',
+              titleColor: displayResult.visualAssumptionStatus ==
+                      VisualAssumptionStatus.needsReview
+                  ? const Color(0xFF9A3412)
+                  : const Color(0xFF166534),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  MathContentView(
+                    displayResult.finalAnswer,
+                    style: TextStyle(
+                        fontSize: 14,
+                        color: isDark
+                            ? colorScheme.onSurface
+                            : const Color(0xFF15803D),
+                        fontWeight: FontWeight.w600),
+                  ),
+                  if (_consistencyNotice(displayResult) != null) ...<Widget>[
+                    const SizedBox(height: 10),
+                    _ConsistencyNotice(
+                      notice: _consistencyNotice(displayResult)!,
+                    ),
+                  ],
+                ],
               ),
             ),
             const SizedBox(height: 10),
@@ -703,6 +733,51 @@ class _AnalysisResultScreenState extends ConsumerState<AnalysisResultScreen> {
     }
   }
 
+  _ConsistencyNoticeData? _consistencyNotice(AnalysisResult result) {
+    switch (result.consistencyStatus) {
+      case AnalysisConsistencyStatus.repaired:
+        if (result.visualAssumptionStatus ==
+            VisualAssumptionStatus.needsReview) {
+          return _ConsistencyNoticeData(
+            text: result.consistencyNote.isNotEmpty
+                ? result.consistencyNote
+                : 'AI 已复核答案；图中关键标注含义仍需核对',
+            icon: CupertinoIcons.exclamationmark_triangle,
+            color: const Color(0xFFEA580C),
+            background: const Color(0xFFFFF7ED),
+          );
+        }
+        return const _ConsistencyNoticeData(
+          text: 'AI 已复核并修正答案',
+          icon: CupertinoIcons.checkmark_shield,
+          color: Color(0xFF16A34A),
+          background: Color(0xFFEFFDF5),
+        );
+      case AnalysisConsistencyStatus.needsReview:
+        if (result.visualAssumptionStatus ==
+            VisualAssumptionStatus.needsReview) {
+          return _ConsistencyNoticeData(
+            text: result.consistencyNote.isNotEmpty
+                ? result.consistencyNote
+                : '图中关键标注含义需核对，当前为可能解法',
+            icon: CupertinoIcons.exclamationmark_triangle,
+            color: const Color(0xFFEA580C),
+            background: const Color(0xFFFFF7ED),
+          );
+        }
+        return const _ConsistencyNoticeData(
+          text: '答案与步骤可能不一致，请核对',
+          icon: CupertinoIcons.exclamationmark_triangle,
+          color: Color(0xFFEA580C),
+          background: Color(0xFFFFF7ED),
+        );
+      case AnalysisConsistencyStatus.unchecked:
+      case AnalysisConsistencyStatus.consistent:
+      case AnalysisConsistencyStatus.unverifiable:
+        return null;
+    }
+  }
+
   void _showFullImage(BuildContext context, String imagePath) {
     Navigator.of(context).push(
       MaterialPageRoute<void>(
@@ -884,6 +959,60 @@ class _SectionCard extends StatelessWidget {
             contentWidget!
           else
             const SizedBox.shrink(),
+        ],
+      ),
+    );
+  }
+}
+
+class _ConsistencyNoticeData {
+  const _ConsistencyNoticeData({
+    required this.text,
+    required this.icon,
+    required this.color,
+    required this.background,
+  });
+
+  final String text;
+  final IconData icon;
+  final Color color;
+  final Color background;
+}
+
+class _ConsistencyNotice extends StatelessWidget {
+  const _ConsistencyNotice({required this.notice});
+
+  final _ConsistencyNoticeData notice;
+
+  @override
+  Widget build(BuildContext context) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      decoration: BoxDecoration(
+        color:
+            isDark ? notice.color.withValues(alpha: 0.14) : notice.background,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: notice.color.withValues(alpha: 0.28)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Icon(notice.icon, size: 15, color: notice.color),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              notice.text,
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.35,
+                color: isDark
+                    ? Theme.of(context).colorScheme.onSurface
+                    : notice.color,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
         ],
       ),
     );

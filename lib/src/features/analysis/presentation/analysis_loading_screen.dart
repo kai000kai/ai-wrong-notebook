@@ -118,6 +118,7 @@ class _AnalysisLoadingScreenState extends ConsumerState<AnalysisLoadingScreen> {
           questionId: working.id,
           subjectName: working.subject.name,
           splitResult: working.splitResult!,
+          imagePath: working.imagePath,
           onProgress: (completed, total, {int failed = 0}) {
             if (mounted) {
               setState(() {
@@ -137,13 +138,24 @@ class _AnalysisLoadingScreenState extends ConsumerState<AnalysisLoadingScreen> {
       }
       final shouldUseImageForAnalysis =
           shouldAnalyzeImageDirectly || _shouldUseImageForAnalysis(working);
+      final textForAnalysis = shouldUseImageForAnalysis
+          ? working.extractedQuestionText
+          : working.correctedText;
 
       final analysis = firstSuccessfulCandidate?.analysisResult ??
           await service.analyzeExtractedQuestion(
-            correctedText: working.correctedText,
+            correctedText: textForAnalysis,
             subjectName: working.subject.name,
             imagePath: shouldUseImageForAnalysis ? working.imagePath : null,
           );
+
+      if (firstSuccessfulCandidate == null &&
+          analysis.reconstructedQuestionText.trim().isNotEmpty) {
+        working = working.copyWith(
+          extractedQuestionText: analysis.reconstructedQuestionText,
+          normalizedQuestionText: analysis.reconstructedQuestionText,
+        );
+      }
 
       final generatedExercises = firstSuccessfulCandidate?.savedExercises ??
           (analysis is ParsedAnalysisResult
@@ -212,6 +224,14 @@ class _AnalysisLoadingScreenState extends ConsumerState<AnalysisLoadingScreen> {
 
   bool _shouldUseImageForAnalysis(QuestionRecord question) {
     final text = question.correctedText.trim();
+    final service = ref.read(aiAnalysisServiceProvider);
+    if (service.isGraphicalQuestion(
+      text,
+      question.subject.name,
+      imagePath: question.imagePath,
+    )) {
+      return true;
+    }
     if (text.length < 20) return true;
 
     return RegExp(

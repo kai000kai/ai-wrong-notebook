@@ -333,6 +333,107 @@ void main() {
     expect(updated.analysisResult?.finalAnswer, '第一题答案');
   });
 
+  testWidgets('loading screen passes image to graphical split candidates',
+      (tester) async {
+    final settingsRepo = _TestSettingsRepository();
+    final service = TestAiAnalysisService(
+      settingsRepository: settingsRepo,
+      extractionResult: const AiQuestionExtractionResult(
+        extractedQuestionText: '1. 如图，求阴影部分面积。\n2. 解方程 x+2=5。',
+        normalizedQuestionText: '1. 如图，求阴影部分面积。\n2. 解方程 x+2=5。',
+        subject: Subject.math,
+        splitResult: QuestionSplitResult(
+          sourceText: '1. 如图，求阴影部分面积。\n2. 解方程 x+2=5。',
+          strategy: QuestionSplitStrategy.numbered,
+          candidates: <QuestionSplitCandidate>[
+            QuestionSplitCandidate(
+              id: 'candidate-0',
+              order: 1,
+              text: '1. 如图，求阴影部分面积。',
+              strategy: QuestionSplitStrategy.numbered,
+            ),
+            QuestionSplitCandidate(
+              id: 'candidate-1',
+              order: 2,
+              text: '2. 解方程 x+2=5。',
+              strategy: QuestionSplitStrategy.numbered,
+            ),
+          ],
+        ),
+      ),
+      analysisResultValue: const AnalysisResult(
+        subject: Subject.math,
+        finalAnswer: '默认答案',
+        steps: <String>['默认步骤'],
+        aiTags: <String>['默认标签'],
+        knowledgePoints: <String>['默认知识点'],
+        mistakeReason: '默认错因',
+        studyAdvice: '默认建议',
+      ),
+      candidateAnalysisResults: const <AnalysisResult>[
+        AnalysisResult(
+          subject: Subject.math,
+          finalAnswer: '图形题答案',
+          steps: <String>['先读图'],
+          aiTags: <String>['面积'],
+          knowledgePoints: <String>['图形面积'],
+          mistakeReason: '漏看图形',
+          studyAdvice: '先标注条件',
+        ),
+        AnalysisResult(
+          subject: Subject.math,
+          finalAnswer: 'x = 3',
+          steps: <String>['移项'],
+          aiTags: <String>['方程'],
+          knowledgePoints: <String>['一元一次方程'],
+          mistakeReason: '移项错误',
+          studyAdvice: '注意变号',
+        ),
+      ],
+    );
+
+    final container = ProviderContainer(
+      overrides: [
+        settingsRepositoryProvider.overrideWithValue(settingsRepo),
+        aiAnalysisServiceProvider.overrideWithValue(service),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    container.read(currentQuestionProvider.notifier).state =
+        QuestionRecord.draft(
+      id: 'q-mixed-graphical',
+      imagePath: '/tmp/fake.jpg',
+      subject: Subject.math,
+      recognizedText: '',
+    );
+
+    final router = GoRouter(
+      initialLocation: '/analysis/loading',
+      routes: <GoRoute>[
+        GoRoute(
+          path: '/analysis/loading',
+          builder: (_, __) => const AnalysisLoadingScreen(),
+        ),
+        GoRoute(
+          path: '/analysis/result',
+          builder: (_, __) => const Scaffold(body: Text('RESULT_SCREEN')),
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(UncontrolledProviderScope(
+      container: container,
+      child: MaterialApp.router(routerConfig: router),
+    ));
+    await tester.pump();
+    await tester.pump();
+    await tester.pumpAndSettle();
+
+    expect(service.analysisCallCount, 2);
+    expect(service.analysisImageCallCount, 1);
+  });
+
   testWidgets('loading screen stops when any split candidate analysis fails',
       (tester) async {
     final settingsRepo = _TestSettingsRepository();

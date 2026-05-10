@@ -12,6 +12,120 @@ import 'package:smart_wrong_notebook/src/domain/models/subject.dart';
 import 'package:smart_wrong_notebook/src/features/analysis/presentation/analysis_result_screen.dart';
 
 void main() {
+  testWidgets('analysis result screen shows repaired consistency notice',
+      (tester) async {
+    final container = ProviderContainer(
+      overrides: <Override>[
+        questionSplitServiceProvider
+            .overrideWithValue(const QuestionSplitService()),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    container.read(currentQuestionProvider.notifier).state =
+        QuestionRecord.draft(
+      id: 'q-repaired',
+      imagePath: '',
+      subject: Subject.math,
+      recognizedText: '求阴影面积',
+    ).copyWith(
+      analysisResult: const AnalysisResult(
+        finalAnswer: r'25\pi/2',
+        steps: <String>[r'阴影面积为 25\pi/2'],
+        aiTags: <String>['几何'],
+        knowledgePoints: <String>['圆面积'],
+        mistakeReason: '漏乘二分之一',
+        studyAdvice: '注意半圆面积',
+        consistencyStatus: AnalysisConsistencyStatus.repaired,
+      ),
+    );
+
+    await tester.pumpWidget(UncontrolledProviderScope(
+      container: container,
+      child: const MaterialApp(home: AnalysisResultScreen()),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.text('AI 已复核并修正答案'), findsOneWidget);
+  });
+
+  testWidgets('analysis result screen shows needs review consistency notice',
+      (tester) async {
+    final container = ProviderContainer(
+      overrides: <Override>[
+        questionSplitServiceProvider
+            .overrideWithValue(const QuestionSplitService()),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    container.read(currentQuestionProvider.notifier).state =
+        QuestionRecord.draft(
+      id: 'q-review',
+      imagePath: '',
+      subject: Subject.math,
+      recognizedText: '应用题',
+    ).copyWith(
+      analysisResult: const AnalysisResult(
+        finalAnswer: 'C. 10',
+        steps: <String>['解得 20，所以选 D。'],
+        aiTags: <String>['应用题'],
+        knowledgePoints: <String>['方程'],
+        mistakeReason: '答案与步骤不一致',
+        studyAdvice: '重新验算',
+        consistencyStatus: AnalysisConsistencyStatus.needsReview,
+      ),
+    );
+
+    await tester.pumpWidget(UncontrolledProviderScope(
+      container: container,
+      child: const MaterialApp(home: AnalysisResultScreen()),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.text('答案与步骤可能不一致，请核对'), findsOneWidget);
+  });
+
+  testWidgets('analysis result screen shows visual assumption review state',
+      (tester) async {
+    final container = ProviderContainer(
+      overrides: <Override>[
+        questionSplitServiceProvider
+            .overrideWithValue(const QuestionSplitService()),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    container.read(currentQuestionProvider.notifier).state =
+        QuestionRecord.draft(
+      id: 'q-visual-review',
+      imagePath: '',
+      subject: Subject.math,
+      recognizedText: '如图，求阴影面积',
+    ).copyWith(
+      analysisResult: const AnalysisResult(
+        finalAnswer: r'25\pi/2',
+        steps: <String>[r'若 10 为直径，则面积为 25\pi/2。'],
+        aiTags: <String>['几何'],
+        knowledgePoints: <String>['半圆面积'],
+        mistakeReason: '图中关键标注含义不确定',
+        studyAdvice: '先核对图中标注',
+        consistencyStatus: AnalysisConsistencyStatus.needsReview,
+        consistencyNote: '需核对 10 的标注含义',
+        visualAssumptionStatus: VisualAssumptionStatus.needsReview,
+      ),
+    );
+
+    await tester.pumpWidget(UncontrolledProviderScope(
+      container: container,
+      child: const MaterialApp(home: AnalysisResultScreen()),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.text('可能解法'), findsOneWidget);
+    expect(find.text('需核对 10 的标注含义'), findsOneWidget);
+  });
+
   testWidgets('analysis result screen builds with latex content',
       (tester) async {
     final container = ProviderContainer(

@@ -11,23 +11,56 @@ import 'package:smart_wrong_notebook/src/domain/models/question_split_result.dar
 import 'package:smart_wrong_notebook/src/domain/models/subject.dart';
 import 'package:smart_wrong_notebook/src/shared/utils/composite_worksheet_detector.dart';
 
-enum _ExerciseTopic {
+enum _ExerciseDomain {
   generic,
-  linearEquation,
-  quadraticRoot,
+  algebraEquation,
   equationSystem,
-  triangleAngle,
-  solidVolume,
   functionEvaluation,
   proportionalRelation,
+  planeGeometryArea,
+  planeGeometryAngle,
+  solidGeometryVolume,
+}
+
+enum _ExerciseObject {
+  generic,
+  linearEquation,
+  quadraticEquation,
+  equationSystem,
+  functionExpression,
+  proportionalRelation,
+  circleFamily,
+  triangle,
+  coneCylinder,
+}
+
+enum _ExerciseMethod {
+  linearSolve,
+  squareRoot,
+  elimination,
+  functionSubstitution,
+  ratioRelation,
+  formulaSubstitution,
+  halfArea,
+  largeMinusSmall,
+  splitAndCombine,
+  shadedArea,
+  angleSum,
 }
 
 enum _TopicProfileSource { sourceQuestion, exercise }
 
 class _ExerciseTopicProfile {
-  const _ExerciseTopicProfile(this.topic, this.hasStrongSignal);
+  const _ExerciseTopicProfile({
+    required this.domain,
+    required this.object,
+    required this.methods,
+    required this.hasStrongSignal,
+  });
 
-  final _ExerciseTopic topic;
+  final _ExerciseDomain domain;
+  final _ExerciseObject object;
+  final Set<_ExerciseMethod> methods;
   final bool hasStrongSignal;
 }
 
@@ -154,7 +187,7 @@ class AiAnalysisService {
     }
   }
 
-  /// 分析题目 - 兼容入口：先提取结构，再做学习分析
+  /// 分析题目 - 图形题先直接读图解题，其他带图题保持先提取结构再分析。
   Future<AnalysisResult> analyzeQuestion({
     required String correctedText,
     required String subjectName,
@@ -170,6 +203,19 @@ class AiAnalysisService {
     var resolvedSubject = _parseSubject(subjectName);
 
     if (imagePath != null && File(imagePath).existsSync()) {
+      final shouldSolveImageDirectly = isGraphicalQuestion(
+        correctedText,
+        subjectName,
+        imagePath: imagePath,
+      );
+      if (shouldSolveImageDirectly) {
+        return analyzeExtractedQuestion(
+          correctedText: correctedText,
+          subjectName: resolvedSubject?.name ?? subjectName,
+          imagePath: imagePath,
+        );
+      }
+
       final extraction = await extractQuestionStructure(
         subjectName: subjectName,
         imagePath: imagePath,
@@ -260,6 +306,7 @@ class AiAnalysisService {
             questionId: questionId,
             subjectName: subjectName,
             candidate: candidate,
+            imagePath: imagePath,
           );
           completed++;
           onProgress?.call(completed, total, failed: failed);
@@ -290,14 +337,23 @@ class AiAnalysisService {
     required String questionId,
     required String subjectName,
     required QuestionSplitCandidate candidate,
+    String? imagePath,
   }) async {
     Object? lastError;
     for (var attempt = 1; attempt <= 2; attempt++) {
       try {
         final candidateText = candidate.text;
+        final candidateImagePath = isGraphicalQuestion(
+          candidateText,
+          subjectName,
+          imagePath: imagePath,
+        )
+            ? imagePath
+            : null;
         final analysis = await analyzeExtractedQuestion(
           correctedText: candidateText,
           subjectName: subjectName,
+          imagePath: candidateImagePath,
         );
         final exercises = analysis is ParsedAnalysisResult
             ? extractGeneratedExercisesFromContent(
@@ -339,7 +395,22 @@ class AiAnalysisService {
     debugPrint('[AiAnalysisService] analyzeExtractedQuestion called');
 
     final config = await _requireConfig();
-    final prompt = _buildAnalysisPrompt(correctedText, subjectName);
+    final isGraphicalQuestion = this.isGraphicalQuestion(
+      correctedText,
+      subjectName,
+      imagePath: imagePath,
+    );
+    final shouldAnalyzeImageFirst = isGraphicalQuestion ||
+        _shouldAnalyzeImageFirst(
+          correctedText,
+          subjectName,
+          imagePath: imagePath,
+        );
+    final prompt = _buildAnalysisPrompt(
+      correctedText,
+      subjectName,
+      isGraphicalQuestion: shouldAnalyzeImageFirst,
+    );
     final systemPrompt = await _loadAnalysisSystemPrompt();
 
     try {
@@ -356,13 +427,25 @@ class AiAnalysisService {
             systemPrompt: systemPrompt,
             prompt: imagePrompt,
             imageBytes: imageBytes,
-            maxTokens: isCompositeLanguageAnalysis ? 3000 : 2000,
-            imageDetail: isCompositeLanguageAnalysis ? 'high' : 'auto',
+            maxTokens: isCompositeLanguageAnalysis || shouldAnalyzeImageFirst
+                ? 3000
+                : 2000,
+            imageDetail: isCompositeLanguageAnalysis || shouldAnalyzeImageFirst
+                ? 'high'
+                : 'auto',
           );
-          return _parseAnalysisResponse(content);
+          final analysis = _parseAnalysisResponse(content);
+          return _ensureAnalysisConsistency(
+            analysis,
+            questionText: correctedText,
+            subjectName: subjectName,
+            imagePath: imagePath,
+            config: config,
+            imageBytes: imageBytes,
+          );
         } on DioException catch (e) {
           if (!_shouldRetryWithCompactImage(e) ||
-              !isCompositeLanguageAnalysis) {
+              !isCompositeLanguageAnalysis && !shouldAnalyzeImageFirst) {
             rethrow;
           }
           debugPrint(
@@ -375,7 +458,15 @@ class AiAnalysisService {
             maxTokens: 2200,
             imageDetail: 'auto',
           );
-          return _parseAnalysisResponse(content);
+          final analysis = _parseAnalysisResponse(content);
+          return _ensureAnalysisConsistency(
+            analysis,
+            questionText: correctedText,
+            subjectName: subjectName,
+            imagePath: imagePath,
+            config: config,
+            imageBytes: imageBytes,
+          );
         }
       }
 
@@ -385,7 +476,14 @@ class AiAnalysisService {
         prompt: prompt,
         maxTokens: isCompositeLanguageAnalysis ? 3000 : 2000,
       );
-      return _parseAnalysisResponse(content);
+      final analysis = _parseAnalysisResponse(content);
+      return _ensureAnalysisConsistency(
+        analysis,
+        questionText: correctedText,
+        subjectName: subjectName,
+        imagePath: null,
+        config: config,
+      );
     } on DioException catch (e) {
       debugPrint(
           '[AiAnalysisService] DioException: type=${e.type}, message=${e.message}, status=${e.response?.statusCode}, body=${e.response?.data}');
@@ -397,6 +495,555 @@ class AiAnalysisService {
       }
       throw AiAnalysisException('AI 解析失败: $e');
     }
+  }
+
+  Future<AnalysisResult> _ensureAnalysisConsistency(
+    AnalysisResult analysis, {
+    required String questionText,
+    required String subjectName,
+    required String? imagePath,
+    required AiProviderConfig config,
+    Uint8List? imageBytes,
+  }) async {
+    final check = _detectAnalysisConsistencyIssue(
+      analysis,
+      questionText: questionText,
+    );
+
+    if (!check.isSuspicious) {
+      // Visual assumption uncertainty and answer consistency are independent
+      // dimensions. When local check finds no conflict, we still set the
+      // appropriate status — but visual uncertainty upgrades the status to
+      // needsReview without triggering the verifier (no internal conflict to
+      // repair).
+      final visualNeedsReview =
+          analysis.visualAssumptionStatus == VisualAssumptionStatus.needsReview;
+      final AnalysisConsistencyStatus status;
+      final String note;
+      if (visualNeedsReview) {
+        status = AnalysisConsistencyStatus.needsReview;
+        note = _visualAssumptionReviewNote(analysis.visualAssumptions);
+      } else if (check.isUnverifiable) {
+        status = AnalysisConsistencyStatus.unverifiable;
+        note = check.note;
+      } else {
+        status = AnalysisConsistencyStatus.consistent;
+        note = check.note;
+      }
+      return analysis.copyWith(
+        consistencyStatus: status,
+        consistencyNote: note,
+        wasVerifierUsed: false,
+      );
+    }
+
+    try {
+      final prompt = _buildConsistencyVerificationPrompt(
+        questionText: questionText,
+        subjectName: subjectName,
+        analysis: analysis,
+        issueSummary: check.note,
+      );
+      final content = imageBytes != null && imagePath != null
+          ? await _requestAiContentWithImage(
+              config: config,
+              systemPrompt: _consistencyVerifierSystemPrompt,
+              prompt: prompt,
+              imageBytes: imageBytes,
+              maxTokens: 1200,
+              imageDetail: 'high',
+              temperature: 0.1,
+            )
+          : await _requestAiContent(
+              config: config,
+              systemPrompt: _consistencyVerifierSystemPrompt,
+              prompt: prompt,
+              maxTokens: 1000,
+              temperature: 0.1,
+            );
+      final verification = _parseConsistencyVerificationResponse(content);
+      return _applyConsistencyVerification(analysis, verification);
+    } catch (e) {
+      debugPrint('[AiAnalysisService] consistency verifier failed: $e');
+      return analysis.copyWith(
+        consistencyStatus: AnalysisConsistencyStatus.needsReview,
+        consistencyNote: '答案与步骤可能不一致，自动复核失败，请人工核对。',
+        wasVerifierUsed: true,
+      );
+    }
+  }
+
+  _ConsistencyCheck _detectAnalysisConsistencyIssue(
+    AnalysisResult analysis, {
+    String? questionText,
+  }) {
+    final formulaIssue = _detectHighRiskFormulaChainIssue(
+      analysis,
+      questionText: questionText,
+    );
+    if (formulaIssue != null) return formulaIssue;
+
+    // Generic: detect contradictory conclusion values within the last few steps.
+    final stepContradiction = _detectStepInternalContradiction(analysis);
+    if (stepContradiction != null) return stepContradiction;
+
+    final finalTokens = _extractLikelyConclusionTokens(analysis.finalAnswer);
+    final derivationTokens = _extractLikelyConclusionTokens(
+      analysis.finalAnswerDerivation,
+    );
+    final stepConclusionTokens = <String>{
+      for (final step in analysis.steps.reversed.take(2))
+        ..._extractLikelyConclusionTokens(step),
+    };
+
+    if (finalTokens.isEmpty ||
+        derivationTokens.isEmpty && stepConclusionTokens.isEmpty) {
+      return const _ConsistencyCheck(
+        isSuspicious: false,
+        isUnverifiable: true,
+        note: '未提取到足够明确的答案结论，未自动复核。',
+      );
+    }
+
+    if (stepConclusionTokens.isNotEmpty &&
+        finalTokens.intersection(stepConclusionTokens).isEmpty) {
+      return _ConsistencyCheck(
+        isSuspicious: true,
+        isUnverifiable: false,
+        note:
+            'finalAnswer 提取为 ${finalTokens.join(', ')}，步骤最终结论提取为 ${stepConclusionTokens.join(', ')}。',
+      );
+    }
+
+    if (derivationTokens.isNotEmpty &&
+        finalTokens.intersection(derivationTokens).isEmpty) {
+      return _ConsistencyCheck(
+        isSuspicious: true,
+        isUnverifiable: false,
+        note:
+            'finalAnswer 提取为 ${finalTokens.join(', ')}，答案来源提取为 ${derivationTokens.join(', ')}。',
+      );
+    }
+
+    if (derivationTokens.isNotEmpty &&
+        stepConclusionTokens.isNotEmpty &&
+        derivationTokens.intersection(stepConclusionTokens).isEmpty) {
+      return _ConsistencyCheck(
+        isSuspicious: true,
+        isUnverifiable: false,
+        note:
+            '答案来源提取为 ${derivationTokens.join(', ')}，步骤最终结论提取为 ${stepConclusionTokens.join(', ')}。',
+      );
+    }
+
+    return const _ConsistencyCheck(
+      isSuspicious: false,
+      isUnverifiable: false,
+      note: '答案与步骤结论一致。',
+    );
+  }
+
+  _ConsistencyCheck? _detectHighRiskFormulaChainIssue(
+    AnalysisResult analysis, {
+    String? questionText,
+  }) {
+    final combined = <String>[
+      questionText ?? '',
+      analysis.finalAnswer,
+      analysis.finalAnswerDerivation,
+      ...analysis.steps,
+      analysis.mistakeReason,
+      ...analysis.aiTags,
+      ...analysis.knowledgePoints,
+    ].join(' ').toLowerCase();
+    if (!_hasPlaneGeometryAreaSignal(combined) ||
+        !_hasCircleAreaSignal(combined) ||
+        !_hasAnySignal(combined, <String>[
+          '半圆',
+          '一半',
+          r'\frac{1}{2}',
+          '1/2',
+          '阴影',
+        ])) {
+      return null;
+    }
+
+    final canonical = _canonicalMathText(combined);
+    final has25PiHalf = _hasAnySignal(canonical, <String>[
+      '25\\pi/2',
+      '\\frac{25\\pi}{2}',
+      '\\frac{25pi}{2}',
+    ]);
+    final has29PiHalf = _hasAnySignal(canonical, <String>[
+      '29\\pi/2',
+      '\\frac{29\\pi}{2}',
+      '\\frac{29pi}{2}',
+    ]);
+    final finalTokens = _extractLikelyConclusionTokens(analysis.finalAnswer);
+    if (has25PiHalf &&
+        has29PiHalf &&
+        (finalTokens.contains(r'25\pi') ||
+            finalTokens.contains(r'25\pi/2') ||
+            finalTokens.contains(r'29\pi/2'))) {
+      return const _ConsistencyCheck(
+        isSuspicious: true,
+        isUnverifiable: false,
+        note: '图形面积解析中同时出现 25π/2、29π/2 或 25π 等不同结论，需复核最终答案。',
+      );
+    }
+
+    if (_hasAnySignal(canonical, <String>[
+      '25\\pi/2*2=25\\pi',
+      '25\\pi/2×2=25\\pi',
+      '25\\pi/2乘2=25\\pi',
+      '1/2\\pi*5^2=25\\pi',
+      '1/2\\pi×5^2=25\\pi',
+      '1/2*\\pi*5^2=25\\pi',
+      '1/2×\\pi×5^2=25\\pi',
+    ])) {
+      return const _ConsistencyCheck(
+        isSuspicious: true,
+        isUnverifiable: false,
+        note: '半圆面积公式链出现从 25π/2 跳到 25π 的矛盾，需复核最终答案。',
+      );
+    }
+
+    final hasHalfCircleFormula = _hasAnySignal(canonical, <String>[
+      '1/2\\pi r^2',
+      '1/2\\pir^2',
+      '1/2*\\pi*r^2',
+      '1/2×\\pi×r^2',
+      '1/2\\pi×r^2',
+      '1/2\\pi*5^2',
+      '1/2\\pi×5^2',
+      '\\frac{1}{2}\\pi r^2',
+      '\\frac{1}{2}\\pir^2',
+      '\\frac{1}{2}\\pi×5^2',
+      '\\frac{1}{2}\\pi*5^2',
+    ]);
+    final derivesHalfOf25Pi = _hasAnySignal(canonical, <String>[
+      '25\\pi/2',
+      '\\frac{25\\pi}{2}',
+      '\\frac{25pi}{2}',
+    ]);
+    if (hasHalfCircleFormula &&
+        derivesHalfOf25Pi &&
+        finalTokens.contains(r'25\pi') &&
+        !finalTokens.any((token) => token.contains('/2'))) {
+      return const _ConsistencyCheck(
+        isSuspicious: true,
+        isUnverifiable: false,
+        note: '半圆面积推导中已得到 25π/2，但 finalAnswer 是 25π，需复核最终答案。',
+      );
+    }
+
+    return null;
+  }
+
+  /// Generic detection: checks if any single step contains mutually exclusive
+  /// final-answer-like conclusions. Unlike [_detectHighRiskFormulaChainIssue]
+  /// this is not hardcoded to specific values.
+  ///
+  /// Only flags cases where a step has **separate conclusion statements**
+  /// (e.g. "所以面积为 10π" and later "最终答案是 29π/2") pointing to
+  /// different values. Continuous formula chains like "= 25π/2 × 2 = 25π"
+  /// are NOT flagged — they are valid computation chains even if the math
+  /// is wrong (math correctness is the verifier's job).
+  _ConsistencyCheck? _detectStepInternalContradiction(
+    AnalysisResult analysis,
+  ) {
+    if (analysis.steps.isEmpty) return null;
+
+    // Look for conclusion keywords that introduce final-answer-like values.
+    final conclusionPattern = RegExp(
+      r'(?:答案|所以|因此|故|得|最终|最后)[^=]*?(?:为|是|=)\s*([^\s,，。；]+)',
+    );
+
+    for (final step in analysis.steps.reversed.take(3)) {
+      final matches = conclusionPattern.allMatches(step).toList();
+      if (matches.length < 2) continue;
+
+      // Extract numeric tokens from each conclusion fragment.
+      final conclusionTokens = <Set<String>>[];
+      for (final match in matches) {
+        final fragment = match.group(1) ?? '';
+        final tokens = _extractAnswerTokens(fragment)
+            .where((t) => RegExp(r'\d|\\pi|pi').hasMatch(t))
+            .toSet();
+        if (tokens.isNotEmpty) conclusionTokens.add(tokens);
+      }
+
+      // If two conclusion statements in the same step point to
+      // different numeric values, that's a genuine contradiction.
+      if (conclusionTokens.length >= 2) {
+        final last = conclusionTokens.last;
+        for (var i = 0; i < conclusionTokens.length - 1; i++) {
+          final earlier = conclusionTokens[i];
+          if (earlier.intersection(last).isEmpty) {
+            return _ConsistencyCheck(
+              isSuspicious: true,
+              isUnverifiable: false,
+              note:
+                  '步骤内部结论矛盾：同一步中先结论 ${earlier.join(', ')}，后结论 ${last.join(', ')}，需复核。',
+            );
+          }
+        }
+      }
+    }
+
+    return null;
+  }
+
+  String _canonicalMathText(String text) {
+    return text
+        .replaceAll(' ', '')
+        .replaceAll('，', ',')
+        .replaceAll('。', '')
+        .replaceAll('＝', '=')
+        .replaceAll('π', r'\pi')
+        .replaceAll('−', '-')
+        .replaceAll('·', '*')
+        .replaceAll('×', '×')
+        .replaceAll(r'\times', '×')
+        .replaceAll(r'\cdot', '*')
+        .replaceAll(r'\left', '')
+        .replaceAll(r'\right', '')
+        .replaceAll('{', '')
+        .replaceAll('}', '')
+        .toLowerCase();
+  }
+
+  Set<String> _extractLikelyConclusionTokens(String text) {
+    final normalized = text
+        .replaceAll(' ', '')
+        .replaceAll('，', ',')
+        .replaceAll('。', '')
+        .replaceAll('＝', '=')
+        .replaceAll('π', r'\pi')
+        .replaceAll('÷', '/')
+        .replaceAll('−', '-')
+        .toLowerCase();
+    final keywordMatch = RegExp(r'(?:答案|选|应选|所以|因此|故|得|为|是)[:：]?([^。；;，,]*)')
+        .allMatches(normalized)
+        .lastOrNull;
+    if (keywordMatch != null) {
+      final tokens = _extractAnswerTokens(keywordMatch.group(1)!);
+      if (tokens.isNotEmpty) return tokens;
+    }
+
+    final equalsIndex = normalized.lastIndexOf('=');
+    if (equalsIndex >= 0 && equalsIndex < normalized.length - 1) {
+      final tokens =
+          _extractAnswerTokens(normalized.substring(equalsIndex + 1));
+      if (tokens.isNotEmpty) return tokens;
+    }
+
+    return _extractAnswerTokens(normalized);
+  }
+
+  Set<String> _extractAnswerTokens(String text) {
+    final normalized = text
+        .replaceAll(' ', '')
+        .replaceAll('，', ',')
+        .replaceAll('。', '')
+        .replaceAll('＝', '=')
+        .replaceAll('π', r'\pi')
+        .replaceAll('÷', '/')
+        .replaceAll('−', '-')
+        .toLowerCase();
+    final tokens = <String>{};
+
+    for (final match
+        in RegExp(r'(?<![a-z])[a-d](?![a-z])').allMatches(normalized)) {
+      tokens.add(match.group(0)!.toUpperCase());
+    }
+    for (final match in RegExp(
+            r'(?:\\frac\{[^{}]+\}\{[^{}]+\}|\d+(?:\.\d+)?(?:\\pi|pi)?(?:/\d+(?:\.\d+)?)?|(?:\\pi|pi)(?:/\d+(?:\.\d+)?)?)')
+        .allMatches(normalized)) {
+      final token = match.group(0)!;
+      if (RegExp(r'\d|\\pi|pi').hasMatch(token)) tokens.add(token);
+    }
+    for (final match
+        in RegExp(r'\\frac\{([^{}]+)\}\{([^{}]+)\}').allMatches(normalized)) {
+      tokens.add('${match.group(1)}/${match.group(2)}');
+    }
+    return tokens
+        .where((token) => token.length > 1 || RegExp(r'[A-D]').hasMatch(token))
+        .toSet();
+  }
+
+  @visibleForTesting
+  AnalysisResult parseAnalysisResponseForTest(String content) {
+    return _parseAnalysisResponse(content);
+  }
+
+  @visibleForTesting
+  AnalysisResult applyConsistencyVerificationForTest(
+    AnalysisResult analysis,
+    String verificationContent,
+  ) {
+    return _applyConsistencyVerification(
+      analysis,
+      _parseConsistencyVerificationResponse(verificationContent),
+    );
+  }
+
+  /// Returns `true` if [_detectAnalysisConsistencyIssue] would mark the
+  /// analysis as suspicious (i.e. would trigger the verifier in production).
+  @visibleForTesting
+  bool detectConsistencyIssueForTest(
+    AnalysisResult analysis, {
+    String? questionText,
+  }) {
+    return _detectAnalysisConsistencyIssue(
+      analysis,
+      questionText: questionText,
+    ).isSuspicious;
+  }
+
+  String _buildConsistencyVerificationPrompt({
+    required String questionText,
+    required String subjectName,
+    required AnalysisResult analysis,
+    required String issueSummary,
+  }) {
+    final buffer = StringBuffer();
+    buffer.writeln('请复核以下错题解析的最终答案一致性。');
+    buffer.writeln('科目：$subjectName');
+    buffer.writeln('题目：$questionText');
+    buffer.writeln('冲突摘要：$issueSummary');
+    buffer.writeln();
+    buffer.writeln('原 finalAnswer：${analysis.finalAnswer}');
+    buffer.writeln('原 finalAnswerDerivation：${analysis.finalAnswerDerivation}');
+    buffer.writeln('原 steps：');
+    for (var i = 0; i < analysis.steps.length; i++) {
+      buffer.writeln('${i + 1}. ${analysis.steps[i]}');
+    }
+    buffer.writeln('原 mistakeReason：${analysis.mistakeReason}');
+    buffer.writeln();
+    buffer.writeln('只判断 finalAnswer 是否与最终推导/步骤一致；不要重新生成举一反三。');
+    buffer.writeln(
+        '如果 steps 内部公式链本身错误，必须返回 correctedSteps，且 correctedSteps 不能保留原错误公式链。');
+    buffer.writeln('如果不一致，只返回应该采用的最终答案、最终答案来源说明、必要的修正步骤和错因。');
+    return buffer.toString();
+  }
+
+  static const _consistencyVerifierSystemPrompt =
+      '''你是错题解析一致性复核器，只检查 finalAnswer 是否与 finalAnswerDerivation 和 steps 的最终结论一致。
+不要把 mistakeReason 中复述的旧答案当作最终结论。
+不要扩写举一反三。
+只有在非常明确时才修正；如果不确定，设置 needsManualReview=true。
+如果 steps 内部有错误公式链或错误结论，必须返回 correctedSteps，不能只修正 finalAnswer。
+如果不能可靠修正 steps，设置 needsManualReview=true。
+返回纯 JSON，不要 markdown：
+{
+  "isConsistent": false,
+  "correctFinalAnswer": "",
+  "correctedFinalAnswerDerivation": "",
+  "correctedSteps": [],
+  "correctedMistakeReason": "",
+  "confidence": "high|medium|low",
+  "needsManualReview": false,
+  "reason": ""
+}''';
+
+  _ConsistencyVerification _parseConsistencyVerificationResponse(
+      String content) {
+    final map = _parseResponseJson(content);
+    return _ConsistencyVerification(
+      isConsistent: map['isConsistent'] as bool? ?? false,
+      correctFinalAnswer: (map['correctFinalAnswer'] as String?)?.trim() ?? '',
+      correctedFinalAnswerDerivation:
+          (map['correctedFinalAnswerDerivation'] as String?)?.trim() ?? '',
+      correctedSteps: List<String>.from(
+        (map['correctedSteps'] as List? ?? <String>[])
+            .map((item) => item.toString().trim())
+            .where((item) => item.isNotEmpty),
+      ),
+      correctedMistakeReason:
+          (map['correctedMistakeReason'] as String?)?.trim() ?? '',
+      confidence: (map['confidence'] as String?)?.trim().toLowerCase() ?? 'low',
+      needsManualReview: map['needsManualReview'] as bool? ?? true,
+      reason: (map['reason'] as String?)?.trim() ?? '',
+    );
+  }
+
+  AnalysisResult _applyConsistencyVerification(
+    AnalysisResult analysis,
+    _ConsistencyVerification verification,
+  ) {
+    if (verification.isConsistent) {
+      final visualNeedsReview =
+          analysis.visualAssumptionStatus == VisualAssumptionStatus.needsReview;
+      return analysis.copyWith(
+        consistencyStatus: visualNeedsReview
+            ? AnalysisConsistencyStatus.needsReview
+            : AnalysisConsistencyStatus.consistent,
+        consistencyNote: visualNeedsReview
+            ? _visualAssumptionReviewNote(analysis.visualAssumptions)
+            : (verification.reason.isNotEmpty
+                ? verification.reason
+                : 'AI 已复核答案与步骤一致。'),
+        wasVerifierUsed: true,
+      );
+    }
+
+    final canRepair = !verification.needsManualReview &&
+        (verification.confidence == 'high' ||
+            verification.confidence == 'medium') &&
+        verification.correctFinalAnswer.isNotEmpty;
+    if (!canRepair) {
+      return analysis.copyWith(
+        consistencyStatus: AnalysisConsistencyStatus.needsReview,
+        consistencyNote: verification.reason.isNotEmpty
+            ? verification.reason
+            : '答案与步骤可能不一致，请人工核对。',
+        wasVerifierUsed: true,
+      );
+    }
+
+    final repairedSteps = verification.correctedSteps.isNotEmpty
+        ? verification.correctedSteps
+            .map(_normalizeExtractedQuestionText)
+            .where((step) => step.isNotEmpty)
+            .toList()
+        : analysis.steps;
+    final repairedMistakeReason = verification.correctedMistakeReason.isNotEmpty
+        ? _normalizeExtractedQuestionText(verification.correctedMistakeReason)
+        : analysis.mistakeReason;
+    final repaired = analysis.copyWith(
+      finalAnswer:
+          _normalizeExtractedQuestionText(verification.correctFinalAnswer),
+      finalAnswerDerivation: _normalizeExtractedQuestionText(
+        verification.correctedFinalAnswerDerivation.isNotEmpty
+            ? verification.correctedFinalAnswerDerivation
+            : analysis.finalAnswerDerivation,
+      ),
+      reconstructedQuestionText: analysis.reconstructedQuestionText,
+      steps: repairedSteps,
+      mistakeReason: repairedMistakeReason,
+      consistencyStatus: AnalysisConsistencyStatus.repaired,
+      consistencyNote:
+          verification.reason.isNotEmpty ? verification.reason : 'AI 已复核并修正答案。',
+      wasVerifierUsed: true,
+    );
+    final check = _detectAnalysisConsistencyIssue(repaired);
+    if (check.isSuspicious) {
+      return analysis.copyWith(
+        consistencyStatus: AnalysisConsistencyStatus.needsReview,
+        consistencyNote: 'AI 复核后仍无法确认最终答案，请人工核对。',
+        wasVerifierUsed: true,
+      );
+    }
+    if (repaired.visualAssumptionStatus == VisualAssumptionStatus.needsReview) {
+      return repaired.copyWith(
+        consistencyStatus: AnalysisConsistencyStatus.needsReview,
+        consistencyNote:
+            'AI 已复核并修正答案；${_visualAssumptionReviewNote(repaired.visualAssumptions)}',
+        wasVerifierUsed: true,
+      );
+    }
+    return repaired;
   }
 
   Future<AiProviderConfig> _requireConfig() async {
@@ -607,6 +1254,7 @@ class AiAnalysisService {
     required String systemPrompt,
     required String prompt,
     int maxTokens = 2000,
+    double temperature = 0.7,
   }) async {
     final dio = _createClient(config);
     final response =
@@ -616,7 +1264,7 @@ class AiAnalysisService {
         <String, String>{'role': 'system', 'content': systemPrompt},
         <String, String>{'role': 'user', 'content': prompt},
       ],
-      'temperature': 0.7,
+      'temperature': temperature,
       'max_tokens': maxTokens,
     });
 
@@ -640,6 +1288,7 @@ class AiAnalysisService {
     required Uint8List imageBytes,
     int maxTokens = 2000,
     String imageDetail = 'auto',
+    double temperature = 0.7,
   }) async {
     final dio = _createClient(config);
     final base64Image = base64Encode(imageBytes);
@@ -667,7 +1316,7 @@ class AiAnalysisService {
             ],
           },
         ],
-        'temperature': 0.7,
+        'temperature': temperature,
         'max_tokens': maxTokens,
       });
       return response.data['choices'][0]['message']['content'] as String;
@@ -688,7 +1337,7 @@ class AiAnalysisService {
             },
           ],
           'generationConfig': {
-            'temperature': 0.7,
+            'temperature': temperature,
             'maxOutputTokens': maxTokens,
           },
         },
@@ -716,7 +1365,7 @@ class AiAnalysisService {
           ],
         },
       ],
-      'temperature': 0.7,
+      'temperature': temperature,
       'max_tokens': maxTokens,
     });
     return response.data['choices'][0]['message']['content'] as String;
@@ -725,7 +1374,7 @@ class AiAnalysisService {
   static const _defaultAnalysisSystemPrompt = '''你是一个专业的错题分析助手，专门帮助学生分析和理解错题。
 
 你的任务是：
-1. 基于已经确认的题目文本进行学习分析
+1. 基于题目文本或图片内容进行学习分析
 2. 根据题目内容判断所属科目（数学、语文、英语、物理、化学、生物、历史、地理、政治等）
 3. 提供正确的解题思路和答案
 4. 分析学生可能犯错误的原因
@@ -733,10 +1382,13 @@ class AiAnalysisService {
 6. 生成举一反三的练习题（选择题格式，带 A/B/C/D 选项）
 
 重要规则：
-- 优先使用用户已确认的题目文本，不要虚构题目
-- 仅在文本明显缺失时，才参考图片补充细节
+- 优先使用用户已确认的题目文本；如果输入包含图片且文本不足，必须直接根据图片理解题目并解题
+- reconstructedQuestionText 必须整理出完整题干；图形题应基于读图理解补全已知条件和求解目标
 - 答案必须准确、有条理
 - 生成的练习题应该难度适中、与原题相关
+- finalAnswer 只能填写题目最终要求的答案，不要填写中间量；必须与 steps 最后一条最终结论一致
+- finalAnswerDerivation 必须用一句话说明最终答案来源，且必须与 finalAnswer 一致；如果 steps、mistakeReason 中出现其他中间答案，不得把中间答案写入 finalAnswer
+- 输出 JSON 前必须自检 finalAnswer、finalAnswerDerivation、steps、mistakeReason 是否一致；若不一致，以重新验算后的最终结论同步修正
 - generatedExercises 必须围绕本题同一个知识点、同一题型、同一种核心解法生成，禁止退化成无关的简单加减法或一元一次方程
 - 如果原题含有平方项、平方根、一元二次或 \(x^2=a\) 结构，练习题也必须包含平方项/开平方/正负根相关解法，不能生成 \(x+1=4\)、\(2x=8\) 这类一元一次题
 - 如果原题是三角形内角/外角/等腰三角形，练习题也必须是三角形角度关系题
@@ -764,7 +1416,9 @@ class AiAnalysisService {
 返回格式必须严格如下（不要包含 markdown 代码块标记，使用纯 JSON）：
 {
   "subject": "自动判断的科目名称",
+  "reconstructedQuestionText": "根据文本或图片理解整理出的完整题干",
   "finalAnswer": "正确答案或解题要点",
+  "finalAnswerDerivation": "最终答案来源说明，必须与 finalAnswer 一致",
   "steps": ["解题步骤1", "解题步骤2"],
   "aiTags": ["短标签1", "短标签2", "短标签3"],
   "knowledgePoints": ["知识点1详细描述", "知识点2详细描述"],
@@ -836,50 +1490,149 @@ class AiAnalysisService {
       buffer.writeln();
       buffer.writeln('用户已有文本提示：');
       buffer.writeln(textHint);
+      buffer.writeln('文本提示可能来自 OCR 或上次整理，只能作参考；图片中的图形、标注和区域关系必须以原图为准。');
     }
     buffer.writeln();
+    buffer.writeln(
+        '若题目包含图形/示意图，请先忠实描述原图中真实看到的图形类型、边界、标注和目标区域；看不清就写不确定，不要猜成梯形/半圆/扇形等特定题型。');
     buffer.writeln(
         '请输出 subject、extractedQuestionText、normalizedQuestionText。方程组或多行公式请使用 aligned/cases 环境，不要使用 \\newline。');
     return buffer.toString();
   }
 
-  String _buildAnalysisPrompt(String correctedText, String subjectName) {
+  bool isGraphicalQuestion(
+    String text,
+    String subjectName, {
+    String? imagePath,
+  }) {
+    if (imagePath == null || imagePath.isEmpty) return false;
+    final subject = _parseSubject(subjectName);
+    if (subject != Subject.math &&
+        subject != Subject.physics &&
+        subject != Subject.science) {
+      return false;
+    }
+
+    final normalized = text.toLowerCase();
+    final hasDiagramCue =
+        RegExp(r'如图|下图|上图|图中|示意图|阴影|图形|图示|图所示').hasMatch(normalized);
+    final hasGraphicalFeature = RegExp(
+            r'面积|周长|角|度|直角|边长|半径|直径|高|底|宽|长|三角形|矩形|长方形|正方形|梯形|圆|半圆|扇形|立方体|长方体|圆柱|圆锥|cm|厘米|mm|毫米|m\b|米|°|∠|速度|相向|每小时')
+        .hasMatch(text);
+    return hasDiagramCue && hasGraphicalFeature;
+  }
+
+  bool _shouldAnalyzeImageFirst(
+    String text,
+    String subjectName, {
+    String? imagePath,
+  }) {
+    if (imagePath == null || imagePath.isEmpty) return false;
+    final subject = _parseSubject(subjectName);
+    if (subject != Subject.math &&
+        subject != Subject.physics &&
+        subject != Subject.science) {
+      return false;
+    }
+
+    final normalized = text.toLowerCase().trim();
+    if (normalized.isEmpty || normalized.length < 80) return true;
+    return RegExp(r'如图|下图|上图|图中|示意图|阴影|图形|图示|图所示|看图|观察图').hasMatch(normalized);
+  }
+
+  @visibleForTesting
+  String buildAnalysisPromptForTest(
+    String correctedText,
+    String subjectName, {
+    bool isGraphicalQuestion = false,
+  }) {
+    return _buildAnalysisPrompt(
+      correctedText,
+      subjectName,
+      isGraphicalQuestion: isGraphicalQuestion,
+    );
+  }
+
+  String _buildAnalysisPrompt(
+    String correctedText,
+    String subjectName, {
+    bool isGraphicalQuestion = false,
+  }) {
     final buffer = StringBuffer();
     buffer.writeln('请分析以下$subjectName科目的错题：');
     buffer.writeln();
-    buffer.writeln('已确认题目文本：');
+    if (isGraphicalQuestion) {
+      buffer.writeln('图片题输入说明：');
+      buffer.writeln(
+          '下面文本可能来自 OCR 或上一步整理，只能作为参考线索，不是已确认题干；图片中的图形、标注、区域关系和求解目标优先级最高。');
+      buffer.writeln('参考文本：');
+    } else {
+      buffer.writeln('已确认题目文本：');
+    }
     buffer.writeln(correctedText);
     buffer.writeln();
-    final topicAnchor = _buildExerciseTopicAnchor(correctedText);
-    if (topicAnchor.isNotEmpty) {
-      buffer.writeln('举一反三题型锚点：$topicAnchor');
-      buffer.writeln('generatedExercises 必须保持这个题型和解题方法，不得降级成更简单的无关题。');
+    if (isGraphicalQuestion) {
+      buffer.writeln('图形/示意图题分析要求：');
+      buffer.writeln('1. 第一目标是直接根据原图理解题目并完成解题，不要把人工确认作为解题前置条件。');
+      buffer.writeln('2. 先读图：只依据图片确认图形结构、可见标注、边界、目标区域或求解对象；参考文本不能覆盖图片观察。');
+      buffer.writeln(
+          '3. 再解题：基于已读出的图形关系选择公式并计算；如果需要辅助线或构造，请说明应该连接哪些点、延长哪条线或把区域拆成哪些基础图形。');
+      buffer.writeln('4. 不要因为参考文本出现面积、阴影、圆、半圆等词就硬套梯形、三角形、半圆或扇形；图形类型必须来自原图观察。');
+      buffer.writeln('5. 不要为了写完整题干而强行命名外部轮廓；除非图片或题干明确说明，不要把外边框称为梯形、三角形、矩形等。');
+      buffer.writeln(
+          '6. 图中数字只能按可确认的标注关系使用；不能自动解释成上底、下底、高、半径或直径。无关或含义不确定的数字不要写入解题条件。');
+      buffer.writeln(
+          '7. reconstructedQuestionText 只重构与求解目标直接相关且能从图片确认的条件；如果目标是求某个圆/半圆/阴影区域面积，不要把无关外框条件编入题干。');
+      buffer.writeln(
+          '8. 只有关键标注、目标区域或半径/直径关系确实无法从图中判断，才在 mistakeReason 或 studyAdvice 中提示需要人工核对；不要因此跳过解题。');
+      buffer.writeln(
+          '9. 解题步骤必须基于 reconstructedQuestionText 中的可靠读图关系展开；不要在步骤中引入未确认的外部形状名称或边长含义。');
+      buffer.writeln(
+          '10. 必须输出 visualAssumptions 对象，用于声明读图假设和关键标注可信度；如果关键标注含义不确定，visualAssumptions.needsManualReview 必须为 true。');
+      buffer.writeln(
+          '11. finalAnswer、finalAnswerDerivation 和 steps 最后一条必须是同一个最终答案；如果读图假设不确定，也只能给一个“在该假设下”的最终答案，不得在 finalAnswerDerivation 中同时写互斥答案。');
       buffer.writeln();
     }
+    if (!isGraphicalQuestion) {
+      final topicAnchor = _buildExerciseTopicAnchor(correctedText);
+      if (topicAnchor.isNotEmpty) {
+        buffer.writeln('举一反三锚点：$topicAnchor');
+        buffer.writeln(
+            'generatedExercises 必须保持 domain/object/method，不得生成 avoid 中的题型。');
+        buffer.writeln();
+      }
+    }
     buffer.writeln(
-        '请以 JSON 格式返回完整的分析结果，包含 subject、finalAnswer、steps、aiTags、knowledgePoints、mistakeReason、studyAdvice、generatedExercises 字段。方程组或多行公式请使用 aligned/cases 环境，不要使用 \\newline。');
+        '请以 JSON 格式返回完整的分析结果，包含 subject、reconstructedQuestionText、visualAssumptions、finalAnswer、finalAnswerDerivation、steps、aiTags、knowledgePoints、mistakeReason、studyAdvice、exerciseAnchor、generatedExercises 字段。reconstructedQuestionText 是 AI 根据题目文本或读图理解整理出的完整题干；图形题的 reconstructedQuestionText 只能包含与求解目标直接相关、且从图片可确认的条件，不要强行命名外部轮廓或解释无关数字。visualAssumptions 格式为 {"targetObject":"","targetQuestion":"","measurements":[{"label":"","meaning":"","usedInSolution":true,"evidence":"image|text|inferred","confidence":"high|medium|low"}],"solutionBasis":[""],"uncertainItems":[""],"needsManualReview":false,"reviewReason":""}；所有步骤使用的图中标注都必须先出现在 measurements 或 solutionBasis 中。exerciseAnchor 只用短枚举，格式 {"domain":"","object":"","methods":[""],"avoid":[""]}。finalAnswerDerivation 必须只说明 finalAnswer 的来源，不能列出与 finalAnswer 互斥的另一个答案；finalAnswer、finalAnswerDerivation、steps 最后一条必须一致。方程组或多行公式请使用 aligned/cases 环境，不要使用 \\newline。');
     return buffer.toString();
   }
 
   String _buildExerciseTopicAnchor(String correctedText) {
     final profile =
         _buildExerciseTopicProfile(sourceQuestionText: correctedText);
-    switch (profile.topic) {
-      case _ExerciseTopic.quadraticRoot:
-        return '含平方项/平方根/一元二次方程，练习必须继续考查把方程整理为 x^2=a、开平方、正负根、代入检验；禁止改成一元一次、函数求值、方程组或几何体积题';
-      case _ExerciseTopic.equationSystem:
-        return '二元一次方程组，练习必须继续考查代入消元或加减消元；题目必须保持方程组结构，禁止改成单个一元一次方程、平方根方程、函数求值或几何题';
-      case _ExerciseTopic.triangleAngle:
-        return '三角形角度关系，练习必须继续考查内角和、外角或等腰三角形角度；禁止改成代数方程、函数求值或几何体积题';
-      case _ExerciseTopic.solidVolume:
-        return '立体几何公式代入，练习必须继续考查圆锥/圆柱/体积公式和代入计算；公式中的 r^2 只是半径平方，禁止改成开平方求正负根、函数求值或方程组';
-      case _ExerciseTopic.functionEvaluation:
-        return '函数解析式代入求值，练习必须继续考查把自变量代入函数表达式并按运算顺序计算函数值；表达式中的 x^2 只是函数项，禁止改成开平方求正负根、方程组或几何题';
-      case _ExerciseTopic.proportionalRelation:
-        return '分式/比例关系与和差条件，练习必须继续考查把比值关系转化为倍数关系，再代入和或差条件求两个量；禁止改成方程组消元、平方根方程、函数求值或几何题';
-      case _ExerciseTopic.linearEquation:
-        return '一元一次方程，练习应继续考查移项、合并同类项、求未知数；禁止改成平方根方程、方程组、函数求值或几何题';
-      case _ExerciseTopic.generic:
+    return _exerciseAnchorText(profile);
+  }
+
+  String _exerciseAnchorText(_ExerciseTopicProfile profile) {
+    switch (profile.domain) {
+      case _ExerciseDomain.planeGeometryArea:
+        return 'domain=planeGeometryArea; object=${profile.object.name}; methods=${profile.methods.map((m) => m.name).join('/')}; avoid=equation/function/quadraticRoot/solidVolume';
+      case _ExerciseDomain.algebraEquation:
+        if (profile.object == _ExerciseObject.quadraticEquation) {
+          return 'domain=algebraEquation; object=quadraticEquation; methods=squareRoot; avoid=linearEquation/function/geometry/volume';
+        }
+        return 'domain=algebraEquation; object=linearEquation; methods=linearSolve; avoid=quadraticRoot/function/geometry/volume';
+      case _ExerciseDomain.equationSystem:
+        return 'domain=equationSystem; object=equationSystem; methods=elimination; avoid=linearEquation/quadraticRoot/function/geometry';
+      case _ExerciseDomain.planeGeometryAngle:
+        return 'domain=planeGeometryAngle; object=triangle; methods=angleSum; avoid=equation/function/volume';
+      case _ExerciseDomain.solidGeometryVolume:
+        return 'domain=solidGeometryVolume; object=coneCylinder; methods=formulaSubstitution; avoid=quadraticRoot/function/equationSystem/planeGeometryArea';
+      case _ExerciseDomain.functionEvaluation:
+        return 'domain=functionEvaluation; object=functionExpression; methods=functionSubstitution; avoid=quadraticRoot/equationSystem/geometry/volume';
+      case _ExerciseDomain.proportionalRelation:
+        return 'domain=proportionalRelation; object=proportionalRelation; methods=ratioRelation; avoid=equationSystem/quadraticRoot/function/geometry';
+      case _ExerciseDomain.generic:
         return '';
     }
   }
@@ -1087,12 +1840,22 @@ class AiAnalysisService {
       debugPrint('[AiAnalysisService] Parsed subject: $subject');
     }
 
+    final visualAssumptions = _parseVisualAssumptions(map['visualAssumptions']);
+
     return ParsedAnalysisResult(
       rawContent: content,
       subject: subject,
       finalAnswer: _normalizeExtractedQuestionText(
         map['finalAnswer'] as String? ?? '',
       ),
+      finalAnswerDerivation: _normalizeExtractedQuestionText(
+        map['finalAnswerDerivation'] as String? ?? '',
+      ),
+      reconstructedQuestionText: _normalizeExtractedQuestionText(
+        map['reconstructedQuestionText'] as String? ?? '',
+      ),
+      visualAssumptions: visualAssumptions,
+      visualAssumptionStatus: _visualAssumptionStatus(visualAssumptions),
       steps: List<String>.from(map['steps'] as List? ?? <String>[])
           .map(_normalizeExtractedQuestionText)
           .toList(),
@@ -1233,6 +1996,41 @@ class AiAnalysisService {
     return parsed;
   }
 
+  VisualAssumptions? _parseVisualAssumptions(Object? value) {
+    if (value is Map<String, dynamic>) {
+      return VisualAssumptions.fromJson(value);
+    }
+    if (value is Map) {
+      return VisualAssumptions.fromJson(Map<String, dynamic>.from(value));
+    }
+    return null;
+  }
+
+  VisualAssumptionStatus _visualAssumptionStatus(
+    VisualAssumptions? assumptions,
+  ) {
+    if (assumptions == null || !assumptions.hasContent) {
+      return VisualAssumptionStatus.none;
+    }
+    if (assumptions.needsManualReview ||
+        assumptions.uncertainItems.isNotEmpty ||
+        assumptions.measurements.any((item) =>
+            item.usedInSolution && item.confidence.toLowerCase() == 'low')) {
+      return VisualAssumptionStatus.needsReview;
+    }
+    return VisualAssumptionStatus.reliable;
+  }
+
+  String _visualAssumptionReviewNote(VisualAssumptions? assumptions) {
+    final reason = assumptions?.reviewReason.trim() ?? '';
+    if (reason.isNotEmpty) return reason;
+    final uncertainItems = assumptions?.uncertainItems ?? const <String>[];
+    if (uncertainItems.isNotEmpty) {
+      return '图中关键标注含义需核对：${uncertainItems.join('、')}。';
+    }
+    return '图中关键标注含义需核对，当前解析仅作可能解法。';
+  }
+
   AnalysisResult _analysisFromParsedMap(Map<String, dynamic> map) {
     List<String> listField(String key) {
       final value = map[key];
@@ -1243,9 +2041,16 @@ class AiAnalysisService {
           .toList();
     }
 
+    final visualAssumptions = _parseVisualAssumptions(map['visualAssumptions']);
+
     return AnalysisResult(
       subject: _parseSubject(map['subject']?.toString() ?? ''),
       finalAnswer: map['finalAnswer']?.toString() ?? '',
+      finalAnswerDerivation: map['finalAnswerDerivation']?.toString() ?? '',
+      reconstructedQuestionText:
+          map['reconstructedQuestionText']?.toString() ?? '',
+      visualAssumptions: visualAssumptions,
+      visualAssumptionStatus: _visualAssumptionStatus(visualAssumptions),
       steps: listField('steps'),
       aiTags: listField('aiTags'),
       knowledgePoints: listField('knowledgePoints'),
@@ -1261,6 +2066,10 @@ class AiAnalysisService {
     if (exercise.question.trim().isEmpty ||
         exercise.answer.trim().isEmpty ||
         exercise.explanation.trim().isEmpty) {
+      return false;
+    }
+
+    if (_hasGeneratedExerciseSelfInvalidation(exercise)) {
       return false;
     }
 
@@ -1281,7 +2090,11 @@ class AiAnalysisService {
 
     final exerciseText =
         '${exercise.question} ${exercise.explanation} ${options.join(' ')}';
-    if (!_exerciseMatchesTopicAnchor(exerciseText, sourceProfile.topic)) {
+    if (!_exerciseMatchesTopicAnchor(exerciseText, sourceProfile)) {
+      return false;
+    }
+    if (sourceProfile.domain == _ExerciseDomain.planeGeometryArea &&
+        _hasForbiddenPlaneAreaDrift(exerciseText)) {
       return false;
     }
 
@@ -1289,30 +2102,92 @@ class AiAnalysisService {
       sourceQuestionText: exerciseText,
       profileSource: _TopicProfileSource.exercise,
     );
-    return exerciseProfile.topic == sourceProfile.topic;
+    return _isExerciseProfileCompatible(sourceProfile, exerciseProfile);
   }
 
-  bool _exerciseMatchesTopicAnchor(String text, _ExerciseTopic topic) {
+  bool _hasGeneratedExerciseSelfInvalidation(GeneratedExercise exercise) {
+    final text =
+        '${exercise.question} ${exercise.explanation} ${exercise.options?.join(' ') ?? ''}';
+    return _hasAnySignal(text, <String>[
+      '选项中没有',
+      '没有该值',
+      '无正确选项',
+      '选项设计不严谨',
+      '选项有误',
+      '原选项设计',
+      '需重新检查',
+      '需要重新检查',
+      '修正后应',
+      '应为修正',
+      '无法从选项',
+      '题目不严谨',
+      '本题无解',
+    ]);
+  }
+
+  bool _hasForbiddenPlaneAreaDrift(String text) {
     final normalized = text.toLowerCase();
-    bool hasAny(Iterable<String> needles) => needles.any(normalized.contains);
-    switch (topic) {
-      case _ExerciseTopic.functionEvaluation:
+    return _hasAnySignal(normalized, <String>[
+      '体积',
+      '立体几何',
+      '圆柱',
+      '圆锥',
+      '长方体',
+      '正方体',
+      '棱柱',
+      '棱锥',
+      'v=',
+      r'\frac{1}{3}\pi',
+      r'\pi r^2 h',
+      'πr^2h',
+      'π r^2 h',
+      '函数',
+      '方程组',
+    ]);
+  }
+
+  bool _isExerciseProfileCompatible(
+    _ExerciseTopicProfile source,
+    _ExerciseTopicProfile exercise,
+  ) {
+    if (source.domain != exercise.domain) return false;
+    if (source.object == _ExerciseObject.circleFamily) {
+      if (exercise.object != _ExerciseObject.circleFamily) return false;
+    } else if (source.object != _ExerciseObject.generic &&
+        exercise.object != source.object) {
+      return false;
+    }
+    if (source.methods.isEmpty || exercise.methods.isEmpty) return true;
+    return source.methods.intersection(exercise.methods).isNotEmpty;
+  }
+
+  bool _exerciseMatchesTopicAnchor(
+    String text,
+    _ExerciseTopicProfile profile,
+  ) {
+    final normalized = text.toLowerCase();
+    switch (profile.domain) {
+      case _ExerciseDomain.functionEvaluation:
         return _hasFunctionSignal(normalized) &&
-            hasAny(
+            _hasAnySignal(normalized,
                 <String>['求', '代入', '函数值', 'f(', 'g(', 'h(', 'f（', 'g（', 'h（']);
-      case _ExerciseTopic.proportionalRelation:
+      case _ExerciseDomain.proportionalRelation:
         return _hasProportionalRelationSignal(normalized);
-      case _ExerciseTopic.solidVolume:
+      case _ExerciseDomain.solidGeometryVolume:
         return _hasVolumeSignal(normalized);
-      case _ExerciseTopic.equationSystem:
+      case _ExerciseDomain.equationSystem:
         return _hasEquationSystemSignal(normalized);
-      case _ExerciseTopic.triangleAngle:
-        return _hasTriangleSignal(normalized);
-      case _ExerciseTopic.quadraticRoot:
-        return _hasQuadraticRootSignal(normalized);
-      case _ExerciseTopic.linearEquation:
+      case _ExerciseDomain.planeGeometryAngle:
+        return _hasTriangleAngleSignal(normalized);
+      case _ExerciseDomain.planeGeometryArea:
+        if (_hasForbiddenPlaneAreaDrift(normalized)) return false;
+        return _hasPlaneGeometryAreaSignal(normalized);
+      case _ExerciseDomain.algebraEquation:
+        if (profile.object == _ExerciseObject.quadraticEquation) {
+          return _hasQuadraticRootSignal(normalized);
+        }
         return _hasLinearEquationSignal(normalized);
-      case _ExerciseTopic.generic:
+      case _ExerciseDomain.generic:
         return true;
     }
   }
@@ -1333,12 +2208,16 @@ class AiAnalysisService {
     ].join(' ').toLowerCase();
 
     final hasVolume = _hasVolumeSignal(text);
+    final hasPlaneGeometryArea =
+        !hasVolume && _hasPlaneGeometryAreaSignal(text);
     final hasFunctionEvaluation = _hasFunctionEvaluationSignal(text);
     final hasProportionalRelation = _hasProportionalRelationSignal(text);
     final hasEquationSystem =
         !hasProportionalRelation && _hasEquationSystemSignal(text);
-    final hasTriangle = _hasTriangleSignal(text);
+    final hasTriangleAngle =
+        !hasPlaneGeometryArea && _hasTriangleAngleSignal(text);
     final hasQuadraticRoot = !hasVolume &&
+        !hasPlaneGeometryArea &&
         !hasFunctionEvaluation &&
         !hasProportionalRelation &&
         _hasQuadraticRootSignal(text, allowBareSquareSymbol: true);
@@ -1346,33 +2225,82 @@ class AiAnalysisService {
         !hasEquationSystem &&
         !hasFunctionEvaluation &&
         !hasProportionalRelation &&
+        !hasPlaneGeometryArea &&
         _hasLinearEquationSignal(text);
 
+    if (hasPlaneGeometryArea) {
+      return _ExerciseTopicProfile(
+        domain: _ExerciseDomain.planeGeometryArea,
+        object: _hasCircleAreaSignal(text)
+            ? _ExerciseObject.circleFamily
+            : _ExerciseObject.generic,
+        methods: _geometryAreaMethods(text),
+        hasStrongSignal: true,
+      );
+    }
     if (hasVolume) {
-      return const _ExerciseTopicProfile(_ExerciseTopic.solidVolume, true);
+      return const _ExerciseTopicProfile(
+        domain: _ExerciseDomain.solidGeometryVolume,
+        object: _ExerciseObject.coneCylinder,
+        methods: <_ExerciseMethod>{_ExerciseMethod.formulaSubstitution},
+        hasStrongSignal: true,
+      );
     }
     if (hasFunctionEvaluation) {
       return const _ExerciseTopicProfile(
-          _ExerciseTopic.functionEvaluation, true);
+        domain: _ExerciseDomain.functionEvaluation,
+        object: _ExerciseObject.functionExpression,
+        methods: <_ExerciseMethod>{_ExerciseMethod.functionSubstitution},
+        hasStrongSignal: true,
+      );
     }
     if (hasProportionalRelation) {
       return const _ExerciseTopicProfile(
-          _ExerciseTopic.proportionalRelation, true);
+        domain: _ExerciseDomain.proportionalRelation,
+        object: _ExerciseObject.proportionalRelation,
+        methods: <_ExerciseMethod>{_ExerciseMethod.ratioRelation},
+        hasStrongSignal: true,
+      );
     }
     if (hasEquationSystem) {
-      return const _ExerciseTopicProfile(_ExerciseTopic.equationSystem, true);
+      return const _ExerciseTopicProfile(
+        domain: _ExerciseDomain.equationSystem,
+        object: _ExerciseObject.equationSystem,
+        methods: <_ExerciseMethod>{_ExerciseMethod.elimination},
+        hasStrongSignal: true,
+      );
     }
-    if (hasTriangle) {
-      return const _ExerciseTopicProfile(_ExerciseTopic.triangleAngle, true);
+    if (hasTriangleAngle) {
+      return const _ExerciseTopicProfile(
+        domain: _ExerciseDomain.planeGeometryAngle,
+        object: _ExerciseObject.triangle,
+        methods: <_ExerciseMethod>{_ExerciseMethod.angleSum},
+        hasStrongSignal: true,
+      );
     }
     if (hasQuadraticRoot) {
-      return const _ExerciseTopicProfile(_ExerciseTopic.quadraticRoot, true);
+      return const _ExerciseTopicProfile(
+        domain: _ExerciseDomain.algebraEquation,
+        object: _ExerciseObject.quadraticEquation,
+        methods: <_ExerciseMethod>{_ExerciseMethod.squareRoot},
+        hasStrongSignal: true,
+      );
     }
     if (hasLinearEquation) {
       final isStrong = profileSource == _TopicProfileSource.exercise;
-      return _ExerciseTopicProfile(_ExerciseTopic.linearEquation, isStrong);
+      return _ExerciseTopicProfile(
+        domain: _ExerciseDomain.algebraEquation,
+        object: _ExerciseObject.linearEquation,
+        methods: const <_ExerciseMethod>{_ExerciseMethod.linearSolve},
+        hasStrongSignal: isStrong,
+      );
     }
-    return const _ExerciseTopicProfile(_ExerciseTopic.generic, false);
+    return const _ExerciseTopicProfile(
+      domain: _ExerciseDomain.generic,
+      object: _ExerciseObject.generic,
+      methods: <_ExerciseMethod>{},
+      hasStrongSignal: false,
+    );
   }
 
   bool _hasAnySignal(String text, Iterable<String> needles) {
@@ -1422,23 +2350,103 @@ class AiAnalysisService {
     ]);
   }
 
-  bool _hasTriangleSignal(String text) {
+  bool _hasTriangleAngleSignal(String text) {
     return _hasAnySignal(
-        text, <String>['三角', '等腰', '内角', '外角', '角形', r'\triangle', '△']);
+            text, <String>['三角', '等腰', '内角', '外角', '角形', r'\triangle', '△']) &&
+        _hasAnySignal(text, <String>['角', '度', r'\angle', '∠', r'^\circ', '°']);
+  }
+
+  bool _hasPlaneGeometryAreaSignal(String text) {
+    if (!_hasAnySignal(text, <String>[
+      '面积',
+      '阴影',
+      '空白部分',
+      '剩余部分',
+      'cm²',
+      'cm^2',
+      'm²',
+      'm^2',
+      '平方厘米',
+      '平方米'
+    ])) {
+      return false;
+    }
+    return _hasAnySignal(text, <String>[
+      '圆',
+      '半圆',
+      '扇形',
+      '圆环',
+      '半径',
+      '直径',
+      r'\pi',
+      'π',
+      '三角形',
+      '矩形',
+      '长方形',
+      '正方形',
+      '梯形',
+      '平行四边形',
+      '底',
+      '高',
+      '宽',
+      '长',
+    ]);
+  }
+
+  bool _hasCircleAreaSignal(String text) {
+    return _hasAnySignal(text, <String>[
+      '圆',
+      '半圆',
+      '扇形',
+      '圆环',
+      '半径',
+      '直径',
+      '圆心角',
+      r'\pi',
+      'π',
+    ]);
+  }
+
+  Set<_ExerciseMethod> _geometryAreaMethods(String text) {
+    final methods = <_ExerciseMethod>{_ExerciseMethod.formulaSubstitution};
+    if (_hasAnySignal(
+        text, <String>['半圆', '一半', r'\frac{1}{2}', '1/2', '比例', '圆心角', '扇形'])) {
+      methods.add(_ExerciseMethod.halfArea);
+    }
+    if (_hasAnySignal(text, <String>['阴影', '空白', '剩余', '剪去'])) {
+      methods.add(_ExerciseMethod.shadedArea);
+    }
+    if (_hasAnySignal(text, <String>['减', '减去', '大圆', '小圆', '圆环', '空白'])) {
+      methods.add(_ExerciseMethod.largeMinusSmall);
+    }
+    if (_hasAnySignal(text, <String>['组合', '拆', '拼', '补'])) {
+      methods.add(_ExerciseMethod.splitAndCombine);
+    }
+    return methods;
   }
 
   bool _hasVolumeSignal(String text) {
-    return _hasAnySignal(text, <String>[
+    final hasSolidObject = _hasAnySignal(text, <String>[
       '体积',
       '立体几何',
       '圆柱',
       '圆锥',
+      '长方体',
+      '正方体',
+      '棱柱',
+      '棱锥',
       '底面半径',
-      '高为',
       r'\frac{1}{3}\pi',
       'πr^2h',
-      'π r^2 h'
+      'π r^2 h',
+      r'\pi r^2 h',
     ]);
+    if (!hasSolidObject) return false;
+    if (_hasPlaneGeometryAreaSignal(text) &&
+        !_hasAnySignal(text, <String>['体积', '圆柱', '圆锥', '长方体', '正方体'])) {
+      return false;
+    }
+    return true;
   }
 
   bool _hasFunctionSignal(String text) {
@@ -1598,7 +2606,66 @@ class AiAnalysisService {
       analysis: analysis,
     );
 
-    if (profile.topic == _ExerciseTopic.quadraticRoot) {
+    if (profile.domain == _ExerciseDomain.planeGeometryArea &&
+        profile.object == _ExerciseObject.circleFamily) {
+      return <GeneratedExercise>[
+        GeneratedExercise(
+          id: 'e1',
+          questionId: questionId,
+          generationMode: ExerciseGenerationMode.practice,
+          difficulty: '简单',
+          question: r'一个圆的半径为 4 cm，求这个圆的面积。',
+          options: const [
+            r'A. \(8\pi\) cm²',
+            r'B. \(12\pi\) cm²',
+            r'C. \(16\pi\) cm²',
+            r'D. \(32\pi\) cm²',
+          ],
+          answer: 'C',
+          explanation: r'圆面积公式为 \(S=\pi r^2\)，代入 \(r=4\)，得 \(S=16\pi\) cm²。',
+          createdAt: now,
+          order: 0,
+        ),
+        GeneratedExercise(
+          id: 'e2',
+          questionId: questionId,
+          generationMode: ExerciseGenerationMode.practice,
+          difficulty: '同级',
+          question: r'一个半圆的半径为 5 cm，求这个半圆的面积。',
+          options: const [
+            r'A. \(10\pi\) cm²',
+            r'B. \(\frac{25\pi}{2}\) cm²',
+            r'C. \(25\pi\) cm²',
+            r'D. \(50\pi\) cm²',
+          ],
+          answer: 'B',
+          explanation:
+              r'整圆面积为 \(25\pi\) cm²，半圆面积是整圆的一半，所以为 \(\frac{25\pi}{2}\) cm²。',
+          createdAt: now,
+          order: 1,
+        ),
+        GeneratedExercise(
+          id: 'e3',
+          questionId: questionId,
+          generationMode: ExerciseGenerationMode.practice,
+          difficulty: '提高',
+          question: r'一个圆环的外圆半径为 6 cm，内圆半径为 4 cm，求圆环面积。',
+          options: const [
+            r'A. \(12\pi\) cm²',
+            r'B. \(16\pi\) cm²',
+            r'C. \(20\pi\) cm²',
+            r'D. \(36\pi\) cm²',
+          ],
+          answer: 'C',
+          explanation: r'圆环面积等于大圆面积减小圆面积，\(36\pi-16\pi=20\pi\) cm²。',
+          createdAt: now,
+          order: 2,
+        ),
+      ];
+    }
+
+    if (profile.domain == _ExerciseDomain.algebraEquation &&
+        profile.object == _ExerciseObject.quadraticEquation) {
       return <GeneratedExercise>[
         GeneratedExercise(
           id: 'e1',
@@ -1655,7 +2722,8 @@ class AiAnalysisService {
       ];
     }
 
-    if (profile.topic == _ExerciseTopic.triangleAngle) {
+    if (profile.domain == _ExerciseDomain.planeGeometryAngle &&
+        profile.object == _ExerciseObject.triangle) {
       return <GeneratedExercise>[
         GeneratedExercise(
           id: 'e1',
@@ -1702,7 +2770,7 @@ class AiAnalysisService {
       ];
     }
 
-    if (profile.topic == _ExerciseTopic.proportionalRelation) {
+    if (profile.domain == _ExerciseDomain.proportionalRelation) {
       return <GeneratedExercise>[
         GeneratedExercise(
           id: 'e1',
@@ -1746,7 +2814,7 @@ class AiAnalysisService {
       ];
     }
 
-    if (profile.topic == _ExerciseTopic.equationSystem) {
+    if (profile.domain == _ExerciseDomain.equationSystem) {
       return <GeneratedExercise>[
         GeneratedExercise(
           id: 'e1',
@@ -1789,7 +2857,7 @@ class AiAnalysisService {
       ];
     }
 
-    if (profile.topic == _ExerciseTopic.solidVolume) {
+    if (profile.domain == _ExerciseDomain.solidGeometryVolume) {
       return <GeneratedExercise>[
         GeneratedExercise(
           id: 'e1',
@@ -1842,7 +2910,7 @@ class AiAnalysisService {
       ];
     }
 
-    if (profile.topic == _ExerciseTopic.functionEvaluation) {
+    if (profile.domain == _ExerciseDomain.functionEvaluation) {
       return <GeneratedExercise>[
         GeneratedExercise(
           id: 'e1',
@@ -1936,6 +3004,40 @@ class AiAnalysisService {
   }
 }
 
+class _ConsistencyCheck {
+  const _ConsistencyCheck({
+    required this.isSuspicious,
+    required this.isUnverifiable,
+    required this.note,
+  });
+
+  final bool isSuspicious;
+  final bool isUnverifiable;
+  final String note;
+}
+
+class _ConsistencyVerification {
+  const _ConsistencyVerification({
+    required this.isConsistent,
+    required this.correctFinalAnswer,
+    required this.correctedFinalAnswerDerivation,
+    required this.correctedSteps,
+    required this.correctedMistakeReason,
+    required this.confidence,
+    required this.needsManualReview,
+    required this.reason,
+  });
+
+  final bool isConsistent;
+  final String correctFinalAnswer;
+  final String correctedFinalAnswerDerivation;
+  final List<String> correctedSteps;
+  final String correctedMistakeReason;
+  final String confidence;
+  final bool needsManualReview;
+  final String reason;
+}
+
 class ParsedAnalysisResult extends AnalysisResult {
   const ParsedAnalysisResult({
     required super.finalAnswer,
@@ -1946,6 +3048,13 @@ class ParsedAnalysisResult extends AnalysisResult {
     required super.studyAdvice,
     required this.rawContent,
     super.subject,
+    super.finalAnswerDerivation,
+    super.reconstructedQuestionText,
+    super.visualAssumptions,
+    super.visualAssumptionStatus,
+    super.consistencyStatus,
+    super.consistencyNote,
+    super.wasVerifierUsed,
   });
 
   final String rawContent;
