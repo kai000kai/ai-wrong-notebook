@@ -13,7 +13,13 @@ import 'package:dio/dio.dart';
 ///   dart run test/tool/single_pass_experiment.dart gpt-5.4
 void main(List<String> args) async {
   final model = args.isNotEmpty ? args[0] : 'gpt-5.5';
-  const apiKey = 'sk-MNMiaxin1v7bxLsFdxpjgiGhvxJSXt5pjlZCXV8JEIPFhWqg';
+  final apiKey = Platform.environment['AI_TEST_API_KEY'] ??
+      Platform.environment['AI_API_KEY'];
+  if (apiKey == null || apiKey.isEmpty) {
+    print(
+        'ERROR: set AI_TEST_API_KEY or AI_API_KEY before running this script.');
+    exit(1);
+  }
   const baseUrl = 'https://www.vbcode.io/v1';
   const imagePath = '/Users/tangjun/opencode/test/1.png';
 
@@ -114,8 +120,9 @@ void main(List<String> args) async {
         final parsed = jsonDecode(jsonMatch.group(0)!) as Map<String, dynamic>;
         final answer = parsed['finalAnswer'] ?? '';
         final steps = parsed['steps'] as List<dynamic>? ?? [];
-        final measurements =
-            (parsed['visualAssumptions'] as Map<String, dynamic>?)?['measurements'] as List<dynamic>? ?? [];
+        final measurements = (parsed['visualAssumptions']
+                as Map<String, dynamic>?)?['measurements'] as List<dynamic>? ??
+            [];
 
         print('\n=== Consistency Check ===');
         print('Final answer: $answer');
@@ -127,10 +134,11 @@ void main(List<String> args) async {
 
         // Check if answer matches expected 29π/2
         final answerStr = answer.toString().toLowerCase();
-        final isCorrect = answerStr.contains('29') && answerStr.contains('pi') ||
-            answerStr.contains('29π') ||
-            answerStr.contains('29\\pi') ||
-            answerStr.contains('14.5π');
+        final isCorrect =
+            answerStr.contains('29') && answerStr.contains('pi') ||
+                answerStr.contains('29π') ||
+                answerStr.contains('29\\pi') ||
+                answerStr.contains('14.5π');
         print('\nAnswer contains 29π/2: $isCorrect');
       } catch (e) {
         print('\nFailed to parse JSON for consistency check: $e');

@@ -10,7 +10,13 @@ import 'package:dio/dio.dart';
 ///   dart run test/tool/direct_image_experiment.dart gpt-5.4
 void main(List<String> args) async {
   final model = args.isNotEmpty ? args[0] : 'gpt-5.5';
-  const apiKey = 'sk-MNMiaxin1v7bxLsFdxpjgiGhvxJSXt5pjlZCXV8JEIPFhWqg';
+  final apiKey = Platform.environment['AI_TEST_API_KEY'] ??
+      Platform.environment['AI_API_KEY'];
+  if (apiKey == null || apiKey.isEmpty) {
+    print(
+        'ERROR: set AI_TEST_API_KEY or AI_API_KEY before running this script.');
+    exit(1);
+  }
   const baseUrl = 'https://www.vbcode.io/v1';
   const imagePath = '/Users/tangjun/opencode/test/1.png';
 
@@ -61,8 +67,9 @@ void main(List<String> args) async {
       },
     );
 
-    final data =
-        response.data is String ? jsonDecode(response.data as String) : response.data;
+    final data = response.data is String
+        ? jsonDecode(response.data as String)
+        : response.data;
 
     final content = data['choices'][0]['message']['content'] as String;
 

@@ -31,6 +31,7 @@ enum _ExerciseObject {
   functionExpression,
   proportionalRelation,
   circleFamily,
+  square,
   triangle,
   rightTriangle,
   coneCylinder,
@@ -50,13 +51,17 @@ enum _ExerciseMethod {
   angleSum,
   pythagorean,
   equalLengthRelation,
+  perpendicularBisector,
+  coordinateGeometry,
 }
 
 enum _ExerciseVariant {
   rightTriangleLength,
   circleArea,
   semicircleArea,
+  compositeSemicircleArea,
   annulusOrShadedArea,
+  squarePerpendicularBisectorLength,
   coneVolume,
   cylinderVolume,
 }
@@ -542,6 +547,14 @@ class AiAnalysisService {
       questionText: questionText,
     );
 
+    if (check.forceManualReview) {
+      return analysis.copyWith(
+        consistencyStatus: AnalysisConsistencyStatus.needsReview,
+        consistencyNote: check.note,
+        wasVerifierUsed: false,
+      );
+    }
+
     if (!check.isSuspicious) {
       // Visual assumption uncertainty and answer consistency are independent
       // dimensions. When local check finds no conflict, we still set the
@@ -609,6 +622,12 @@ class AiAnalysisService {
     AnalysisResult analysis, {
     String? questionText,
   }) {
+    final targetMismatch = _detectGraphicalTargetMismatch(
+      analysis,
+      questionText: questionText,
+    );
+    if (targetMismatch != null) return targetMismatch;
+
     final formulaIssue = _detectHighRiskFormulaChainIssue(
       analysis,
       questionText: questionText,
@@ -673,6 +692,60 @@ class AiAnalysisService {
       isUnverifiable: false,
       note: '答案与步骤结论一致。',
     );
+  }
+
+  _ConsistencyCheck? _detectGraphicalTargetMismatch(
+    AnalysisResult analysis, {
+    String? questionText,
+  }) {
+    final source = questionText?.toLowerCase() ?? '';
+    if (source.isEmpty) return null;
+
+    final asksCompositeRegion = _hasCompositeAreaTargetSignal(source);
+    if (!asksCompositeRegion) return null;
+
+    final targetText = <String>[
+      analysis.reconstructedQuestionText,
+      analysis.visualAssumptions?.targetObject ?? '',
+      analysis.visualAssumptions?.targetQuestion ?? '',
+    ].join(' ').toLowerCase();
+    if (targetText.isEmpty) return null;
+
+    final targetsOnlySemicircle = _hasAnySignal(targetText, <String>[
+          '求半圆面积',
+          '求该半圆的面积',
+          '求这个半圆的面积',
+          '求阴影半圆面积',
+          '半圆面积',
+        ]) &&
+        !_hasCompositeAreaTargetSignal(targetText);
+
+    if (!targetsOnlySemicircle) return null;
+
+    return const _ConsistencyCheck(
+      isSuspicious: true,
+      isUnverifiable: false,
+      forceManualReview: true,
+      note: '参考题干指向括号状/剩余区域面积，但 AI 重构目标变成只求半圆面积，需复核读图目标。',
+    );
+  }
+
+  bool _hasCompositeAreaTargetSignal(String text) {
+    return _hasAnySignal(text, <String>[
+      '括号',
+      '括号状',
+      '剩余区域',
+      '剩余面积',
+      '剩余部分',
+      '半圆外',
+      '外框内',
+      '外边界与半圆',
+      '目标区域',
+      '所示区域',
+      '阴影区域',
+      '阴影部分',
+      '空白部分',
+    ]);
   }
 
   _ConsistencyCheck? _detectHighRiskFormulaChainIssue(
@@ -933,6 +1006,17 @@ class AiAnalysisService {
     ).isSuspicious;
   }
 
+  @visibleForTesting
+  bool consistencyIssueForcesManualReviewForTest(
+    AnalysisResult analysis, {
+    String? questionText,
+  }) {
+    return _detectAnalysisConsistencyIssue(
+      analysis,
+      questionText: questionText,
+    ).forceManualReview;
+  }
+
   String _buildConsistencyVerificationPrompt({
     required String questionText,
     required String subjectName,
@@ -1172,6 +1256,15 @@ class AiAnalysisService {
       );
     }
 
+    if (_isCompositeQuestionWithSubparts(normalized, subject: subject)) {
+      return QuestionSplitResult(
+        sourceText: normalized,
+        candidates: _buildSplitCandidates(
+            <String>[normalized], QuestionSplitStrategy.fallback),
+        strategy: QuestionSplitStrategy.fallback,
+      );
+    }
+
     final numberedSegments = _splitByNumberedQuestions(normalized);
     if (numberedSegments.length >= 2) {
       return QuestionSplitResult(
@@ -1246,6 +1339,89 @@ class AiAnalysisService {
       return true;
     }
     return isCompositeLanguageWorksheet(text, subject: subject);
+  }
+
+  bool _isCompositeQuestionWithSubparts(String text, {Subject? subject}) {
+    if (subject == Subject.chinese ||
+        subject == Subject.english ||
+        subject == Subject.history ||
+        subject == Subject.geography ||
+        subject == Subject.politics) {
+      return false;
+    }
+    final hasSubQuestions =
+        RegExp(r'（\s*\d+\s*）|\(\s*\d+\s*\)').allMatches(text).length >= 2;
+    if (!hasSubQuestions) return false;
+
+    final independentQuestionCount =
+        RegExp(r'(^|\n)\s*(?:第\s*\d+\s*题|\d+[\.、．)])\s*', multiLine: true)
+            .allMatches(text)
+            .length;
+    if (independentQuestionCount >= 2) return false;
+
+    return _hasSharedCompositeStemSignal(text, subject: subject);
+  }
+
+  bool _hasSharedCompositeStemSignal(String text, {Subject? subject}) {
+    final lower = text.toLowerCase();
+    final hasGenericStem = _hasAnySignal(text, <String>[
+      '如图',
+      '根据下列',
+      '结合材料',
+      '已知',
+      '条件',
+      '回答下列问题',
+      '完成下列问题',
+    ]);
+    final hasMathPhysicsStem = _hasAnySignal(text, <String>[
+      '电路',
+      '装置',
+      '实验',
+      '函数图像',
+      '坐标系',
+      '正方形',
+      '矩形',
+      '三角形',
+      '圆',
+    ]);
+    final hasChemistryStem = _hasAnySignal(text, <String>[
+      '合成路线',
+      '流程',
+      '路线',
+      '转化关系',
+      '可通过如下',
+      '如图',
+      '条件',
+      '已知',
+      '写出',
+      '结构简式',
+      '分子式',
+      '化学方程式',
+      '反应类型',
+    ]);
+    final hasChemistryContext = _hasAnySignal(lower, <String>[
+      'naoh',
+      'nh2oh',
+      'hcl',
+      'br',
+      'fecl3',
+      'c6h',
+      '苯',
+      '酯',
+      '醇',
+      '醛',
+      '羧酸',
+      '有机',
+      '官能团',
+      '同分异构体',
+    ]);
+    if (subject == Subject.chemistry) {
+      return hasGenericStem || hasChemistryStem || hasChemistryContext;
+    }
+    if (subject == Subject.math || subject == Subject.physics) {
+      return hasGenericStem || hasMathPhysicsStem;
+    }
+    return hasGenericStem || hasMathPhysicsStem || hasChemistryStem;
   }
 
   List<QuestionSplitCandidate> _buildSplitCandidates(
@@ -1403,7 +1579,7 @@ class AiAnalysisService {
     return response.data['choices'][0]['message']['content'] as String;
   }
 
-  static const _defaultAnalysisSystemPrompt = '''你是一个专业的错题分析助手，专门帮助学生分析和理解错题。
+  static const _defaultAnalysisSystemPrompt = r'''你是一个专业的错题分析助手，专门帮助学生分析和理解错题。
 
 你的任务是：
 1. 基于题目文本或图片内容进行学习分析
@@ -1467,7 +1643,7 @@ class AiAnalysisService {
 }''';
 
   static const _defaultExtractionSystemPrompt =
-      '''你是一个专业的教辅录入员，负责把题目图片整理成可存储、可检索的结构化文本。
+      r'''你是一个专业的教辅录入员，负责把题目图片整理成可存储、可检索的结构化文本。
 
 你的任务是：
 1. 识别图片中的原始题目内容
@@ -1822,6 +1998,11 @@ class AiAnalysisService {
 
       if (char == r'\') {
         if (inString) {
+          if (escaped) {
+            buffer.write(char);
+            escapeRun++;
+            continue;
+          }
           final next = index + 1 < jsonStr.length ? jsonStr[index + 1] : '';
           final nextNext = index + 2 < jsonStr.length ? jsonStr[index + 2] : '';
           if (next.isEmpty || !_isValidJsonEscape(next, nextNext)) {
@@ -2004,7 +2185,9 @@ class AiAnalysisService {
         id: id != null && id.isNotEmpty ? id : 'gen_${questionId}_${index + 1}',
         questionId: questionId,
         generationMode: ExerciseGenerationMode.practice,
-        difficulty: (exerciseMap['difficulty'] as String?)?.trim() ?? '同级',
+        difficulty: _normalizeExerciseDifficulty(
+          (exerciseMap['difficulty'] as String?)?.trim(),
+        ),
         question: question,
         answer: _normalizeExtractedQuestionText(
           (exerciseMap['answer'] as String?)?.trim() ?? '',
@@ -2037,17 +2220,21 @@ class AiAnalysisService {
       }
     }
 
-    final expectedCount = rawExercises.length >= 3 ? 3 : rawExercises.length;
     if (sourceProfile.hasStrongSignal) {
-      final ordered = _orderedGeneratedExercises(parsed);
-      if (ordered.length == 3) return ordered;
-      return _defaultGeneratedExercises(
+      final defaults = _defaultGeneratedExercises(
         questionId,
         analysis: parsedAnalysis,
         sourceQuestionText: sourceQuestionText,
       );
+      return _mergeGeneratedExercisesWithDefaults(
+        parsed,
+        defaults,
+        questionId: questionId,
+        now: now,
+      );
     }
 
+    final expectedCount = rawExercises.length >= 3 ? 3 : rawExercises.length;
     if (parsed.length < expectedCount) {
       return _defaultGeneratedExercises(
         questionId,
@@ -2056,23 +2243,124 @@ class AiAnalysisService {
       );
     }
 
-    return parsed;
+    return _selectPracticeExerciseSet(
+      parsed,
+      questionId: questionId,
+      now: now,
+    );
   }
 
-  List<GeneratedExercise> _orderedGeneratedExercises(
-    List<GeneratedExercise> exercises,
-  ) {
-    const rank = <String, int>{'简单': 0, '同级': 1, '提高': 2};
-    if (exercises.length != 3) return const <GeneratedExercise>[];
-    if (!exercises.every((exercise) => rank.containsKey(exercise.difficulty))) {
-      return const <GeneratedExercise>[];
+  List<GeneratedExercise> _mergeGeneratedExercisesWithDefaults(
+    List<GeneratedExercise> accepted,
+    List<GeneratedExercise> defaults, {
+    required String questionId,
+    required DateTime now,
+  }) {
+    const difficulties = <String>['简单', '同级', '提高'];
+    final byDifficulty = <String, GeneratedExercise>{};
+
+    for (final exercise in accepted) {
+      byDifficulty.putIfAbsent(exercise.difficulty, () => exercise);
     }
-    final ordered = [...exercises]
-      ..sort((a, b) => rank[a.difficulty]!.compareTo(rank[b.difficulty]!));
-    for (var index = 0; index < ordered.length; index++) {
-      ordered[index] = ordered[index].copyWith(order: index);
+
+    final merged = <GeneratedExercise>[];
+    for (var index = 0; index < difficulties.length; index++) {
+      final difficulty = difficulties[index];
+      final fallback = defaults.firstWhere(
+        (exercise) => exercise.difficulty == difficulty,
+        orElse: () => defaults[index],
+      );
+      final selected = byDifficulty[difficulty] ?? fallback;
+      final selectedIsFallback = identical(selected, fallback);
+      merged.add(GeneratedExercise(
+        id: selected.id.isNotEmpty
+            ? selected.id
+            : 'gen_${questionId}_${index + 1}',
+        questionId: questionId,
+        generationMode: selected.generationMode,
+        difficulty: difficulty,
+        question: selected.question,
+        answer: selected.answer,
+        explanation: selected.explanation,
+        createdAt: selectedIsFallback ? fallback.createdAt : now,
+        order: index,
+        options: selected.options,
+        diagramData: selected.diagramData,
+      ));
     }
-    return ordered;
+    return merged;
+  }
+
+  List<GeneratedExercise> _selectPracticeExerciseSet(
+    List<GeneratedExercise> exercises, {
+    required String questionId,
+    required DateTime now,
+  }) {
+    const difficulties = <String>['简单', '同级', '提高'];
+    final selected = <GeneratedExercise>[];
+    final used = <String>{};
+
+    for (final difficulty in difficulties) {
+      final match = exercises
+          .where((exercise) => exercise.difficulty == difficulty)
+          .cast<GeneratedExercise?>()
+          .firstWhere((exercise) => exercise != null, orElse: () => null);
+      if (match != null) {
+        selected.add(match);
+        used.add(match.id);
+      }
+    }
+
+    for (final exercise in exercises) {
+      if (selected.length >= 3) break;
+      if (used.contains(exercise.id)) continue;
+      selected.add(exercise);
+      used.add(exercise.id);
+    }
+
+    return selected.asMap().entries.map((entry) {
+      final exercise = entry.value;
+      return GeneratedExercise(
+        id: exercise.id.isNotEmpty
+            ? exercise.id
+            : 'gen_${questionId}_${entry.key + 1}',
+        questionId: questionId,
+        generationMode: exercise.generationMode,
+        difficulty: difficulties.length > entry.key
+            ? difficulties[entry.key]
+            : exercise.difficulty,
+        question: exercise.question,
+        answer: exercise.answer,
+        explanation: exercise.explanation,
+        createdAt: exercise.createdAt,
+        order: entry.key,
+        options: exercise.options,
+        diagramData: exercise.diagramData,
+      );
+    }).toList();
+  }
+
+  String _normalizeExerciseDifficulty(String? difficulty) {
+    final normalized = difficulty?.trim() ?? '';
+    switch (normalized) {
+      case '简单':
+      case '基础':
+      case '容易':
+        return '简单';
+      case '同级':
+      case '中等':
+      case '普通':
+      case '巩固':
+        return '同级';
+      case '提高':
+      case '提升':
+      case '困难':
+      case '挑战':
+      case '拓展':
+        return '提高';
+      default:
+        return normalized.isEmpty ? '同级' : normalized;
+    }
   }
 
   Map<String, dynamic>? _parseDiagramData(Object? value) {
@@ -2102,10 +2390,20 @@ class AiAnalysisService {
     if (assumptions.needsManualReview ||
         assumptions.uncertainItems.isNotEmpty ||
         assumptions.measurements.any((item) =>
-            item.usedInSolution && item.confidence.toLowerCase() == 'low')) {
+            item.usedInSolution &&
+            _isReviewLevelVisualAssumption(item.confidence))) {
       return VisualAssumptionStatus.needsReview;
     }
     return VisualAssumptionStatus.reliable;
+  }
+
+  bool _isReviewLevelVisualAssumption(String confidence) {
+    final normalized = confidence.toLowerCase().trim();
+    return normalized == 'low' ||
+        normalized == 'medium' ||
+        normalized == '中' ||
+        normalized == '中等' ||
+        normalized == '低';
   }
 
   String _visualAssumptionReviewNote(VisualAssumptions? assumptions) {
@@ -2160,6 +2458,10 @@ class AiAnalysisService {
       return false;
     }
 
+    if (_hasGeneratedExerciseAnswerConflict(exercise)) {
+      return false;
+    }
+
     final normalizedAnswer = exercise.answer.trim().toUpperCase();
     if (!RegExp(r'^[A-D]$').hasMatch(normalizedAnswer)) return false;
 
@@ -2173,11 +2475,19 @@ class AiAnalysisService {
       return false;
     }
 
+    if (_requiresExerciseDiagram(sourceProfile) &&
+        exercise.diagramData == null) {
+      return false;
+    }
+
     if (!sourceProfile.hasStrongSignal) return true;
 
     final exerciseText =
         '${exercise.question} ${exercise.explanation} ${options.join(' ')}';
     if (!_exerciseMatchesTopicAnchor(exerciseText, sourceProfile)) {
+      return false;
+    }
+    if (!_exerciseMatchesSourceTarget(exerciseText, sourceProfile)) {
       return false;
     }
     if (sourceProfile.domain == _ExerciseDomain.planeGeometryArea &&
@@ -2190,6 +2500,33 @@ class AiAnalysisService {
       profileSource: _TopicProfileSource.exercise,
     );
     return _isExerciseProfileCompatible(sourceProfile, exerciseProfile);
+  }
+
+  bool _exerciseMatchesSourceTarget(
+    String exerciseText,
+    _ExerciseTopicProfile sourceProfile,
+  ) {
+    if (sourceProfile.domain != _ExerciseDomain.planeGeometryArea) {
+      return true;
+    }
+
+    if (sourceProfile.variant == _ExerciseVariant.compositeSemicircleArea) {
+      return _hasCompositeAreaTargetSignal(exerciseText) &&
+          !_targetsOnlySemicircleArea(exerciseText);
+    }
+
+    return true;
+  }
+
+  bool _targetsOnlySemicircleArea(String text) {
+    final normalized = text.toLowerCase();
+    final asksSemicircleArea = _hasAnySignal(normalized, <String>[
+      '求半圆面积',
+      '求该半圆的面积',
+      '求这个半圆的面积',
+      '求阴影半圆面积',
+    ]);
+    return asksSemicircleArea && !_hasCompositeAreaTargetSignal(normalized);
   }
 
   bool _hasGeneratedExerciseSelfInvalidation(GeneratedExercise exercise) {
@@ -2210,6 +2547,26 @@ class AiAnalysisService {
       '题目不严谨',
       '本题无解',
     ]);
+  }
+
+  bool _requiresExerciseDiagram(_ExerciseTopicProfile sourceProfile) {
+    return sourceProfile.domain == _ExerciseDomain.planeGeometryArea ||
+        sourceProfile.domain == _ExerciseDomain.planeGeometryAngle ||
+        sourceProfile.domain == _ExerciseDomain.planeGeometryLength;
+  }
+
+  bool _hasGeneratedExerciseAnswerConflict(GeneratedExercise exercise) {
+    final answer = exercise.answer.trim().toUpperCase();
+    if (!RegExp(r'^[A-D]$').hasMatch(answer)) return false;
+    final text = exercise.explanation.replaceAll(' ', '').toUpperCase();
+    final explicitAnswerMatches = RegExp(
+      r'(?:答案(?:是|为)?|正确答案(?:是|为)?|正确选项(?:是|为)?|应选|应为|选择|选)([A-D])',
+    ).allMatches(text);
+    for (final match in explicitAnswerMatches) {
+      final stated = match.group(1);
+      if (stated != null && stated != answer) return true;
+    }
+    return false;
   }
 
   bool _hasForbiddenPlaneAreaDrift(String text) {
@@ -2275,7 +2632,7 @@ class AiAnalysisService {
         if (_hasForbiddenPlaneAreaDrift(normalized)) return false;
         return _hasPlaneGeometryAreaSignal(normalized);
       case _ExerciseDomain.planeGeometryLength:
-        return _hasRightTriangleLengthSignal(normalized);
+        return _hasPlaneGeometryLengthSignal(normalized, profile);
       case _ExerciseDomain.algebraEquation:
         if (profile.object == _ExerciseObject.quadraticEquation) {
           return _hasQuadraticRootSignal(normalized);
@@ -2306,8 +2663,12 @@ class AiAnalysisService {
         !hasVolume && _hasPlaneGeometryAreaSignal(text);
     final hasFunctionEvaluation = _hasFunctionEvaluationSignal(text);
     final hasProportionalRelation = _hasProportionalRelationSignal(text);
+    final hasSquarePerpendicularBisectorLength = !hasPlaneGeometryArea &&
+        !hasVolume &&
+        _hasSquarePerpendicularBisectorLengthSignal(text);
     final hasRightTriangleLength = !hasPlaneGeometryArea &&
         !hasVolume &&
+        !hasSquarePerpendicularBisectorLength &&
         _hasRightTriangleLengthSignal(text);
     final hasEquationSystem =
         !hasProportionalRelation && _hasEquationSystemSignal(text);
@@ -2350,6 +2711,19 @@ class AiAnalysisService {
         methods: methods,
         hasStrongSignal: true,
         variant: _ExerciseVariant.rightTriangleLength,
+      );
+    }
+    if (hasSquarePerpendicularBisectorLength) {
+      return const _ExerciseTopicProfile(
+        domain: _ExerciseDomain.planeGeometryLength,
+        object: _ExerciseObject.square,
+        methods: <_ExerciseMethod>{
+          _ExerciseMethod.equalLengthRelation,
+          _ExerciseMethod.perpendicularBisector,
+          _ExerciseMethod.coordinateGeometry,
+        },
+        hasStrongSignal: true,
+        variant: _ExerciseVariant.squarePerpendicularBisectorLength,
       );
     }
     if (hasVolume) {
@@ -2507,11 +2881,60 @@ class AiAnalysisService {
             text, <String>['三角', '角形', '△', r'\triangle', 'ab', 'bc', 'ac']);
   }
 
+  bool _hasSquarePerpendicularBisectorLengthSignal(String text) {
+    if (_hasPlaneGeometryAreaSignal(text) || _hasVolumeSignal(text)) {
+      return false;
+    }
+    final hasLengthTarget = _hasAnySignal(text, <String>[
+      '线段',
+      '边长',
+      '长度',
+      '求df',
+      '求 df',
+      '求af',
+      '求 af',
+      '求ef',
+      '求 ef',
+    ]);
+    if (!hasLengthTarget) return false;
+    final hasSquare = _hasAnySignal(text, <String>['正方形', 'abcd']);
+    final hasPerpendicularBisector =
+        _hasAnySignal(text, <String>['垂直平分线', '垂直平分', '中垂线']);
+    final hasEdgePoint = _hasAnySignal(text, <String>[
+      '中点',
+      '点f',
+      '点 f',
+      '边dc',
+      '边 dc',
+      'dc上',
+      'dc 上',
+    ]);
+    return hasSquare && hasPerpendicularBisector && hasEdgePoint;
+  }
+
+  bool _hasPlaneGeometryLengthSignal(
+    String text,
+    _ExerciseTopicProfile profile,
+  ) {
+    switch (profile.variant) {
+      case _ExerciseVariant.squarePerpendicularBisectorLength:
+        return _hasSquarePerpendicularBisectorLengthSignal(text);
+      case _ExerciseVariant.rightTriangleLength:
+        return _hasRightTriangleLengthSignal(text);
+      default:
+        return _hasRightTriangleLengthSignal(text) ||
+            _hasSquarePerpendicularBisectorLengthSignal(text);
+    }
+  }
+
   bool _hasEqualLengthSignal(String text) {
     return _hasAnySignal(text, <String>['等长', '相等', 'bd=bc', 'ab=ac', 'bc=bd']);
   }
 
   _ExerciseVariant? _circleAreaVariant(String text) {
+    if (_hasCompositeSemicircleAreaSignal(text)) {
+      return _ExerciseVariant.compositeSemicircleArea;
+    }
     if (_hasAnySignal(
         text, <String>['圆环', '大圆', '小圆', '空白', '剩余', '减去', '挖去', '内圆', '外圆'])) {
       return _ExerciseVariant.annulusOrShadedArea;
@@ -2526,6 +2949,49 @@ class AiAnalysisService {
       return _ExerciseVariant.circleArea;
     }
     return null;
+  }
+
+  bool _hasCompositeSemicircleAreaSignal(String text) {
+    final hasSemicircle = _hasAnySignal(text, <String>['半圆']);
+    final hasOuterArea = _hasAnySignal(
+      text,
+      <String>[
+        '梯形',
+        '上底',
+        '下底',
+        '上边',
+        '下边',
+        '底边',
+        '水平边',
+        '外框',
+        '外边界',
+        '外框面积',
+        '上方水平边',
+        '下方水平边',
+        '右侧竖直边',
+        '右边高',
+      ],
+    );
+    final hasDiameterDerived = _hasAnySignal(
+      text,
+      <String>[
+        '斜边',
+        '直径',
+        '勾股',
+        '水平差',
+        '竖直差',
+        '高度',
+        '高为',
+        '右边高',
+        '竖直边高',
+        '竖直高度',
+      ],
+    );
+    final hasDifference = _hasAnySignal(
+      text,
+      <String>['剩余', '减去', '减小', '面积差', '外侧', '之间', '括号', '半圆外'],
+    );
+    return hasSemicircle && hasOuterArea && hasDiameterDerived && hasDifference;
   }
 
   _ExerciseVariant? _solidVolumeVariant(String text) {
@@ -2595,10 +3061,11 @@ class AiAnalysisService {
         text, <String>['半圆', '一半', r'\frac{1}{2}', '1/2', '比例', '圆心角', '扇形'])) {
       methods.add(_ExerciseMethod.halfArea);
     }
-    if (_hasAnySignal(text, <String>['阴影', '空白', '剩余', '剪去'])) {
+    if (_hasAnySignal(text, <String>['阴影', '空白', '剩余', '剪去', '半圆外'])) {
       methods.add(_ExerciseMethod.shadedArea);
     }
-    if (_hasAnySignal(text, <String>['减', '减去', '大圆', '小圆', '圆环', '空白'])) {
+    if (_hasAnySignal(
+        text, <String>['减', '减去', '减小', '大圆', '小圆', '圆环', '空白', '半圆外'])) {
       methods.add(_ExerciseMethod.largeMinusSmall);
     }
     if (_hasAnySignal(text, <String>['组合', '拆', '拼', '补'])) {
@@ -2903,6 +3370,71 @@ class AiAnalysisService {
     ];
   }
 
+  List<GeneratedExercise> _defaultCompositeSemicircleAreaExercises(
+    String questionId,
+    DateTime now,
+  ) {
+    return <GeneratedExercise>[
+      GeneratedExercise(
+        id: 'e1',
+        questionId: questionId,
+        generationMode: ExerciseGenerationMode.practice,
+        difficulty: '简单',
+        question: r'如图，上边长为 2，下边长为 5，右边高为 4，半圆以左侧斜边为直径。求右侧外边界与半圆弧之间区域的面积。',
+        options: const [
+          r'A. \(14-\frac{25\pi}{8}\)',
+          r'B. \(14-\frac{25\pi}{4}\)',
+          r'C. \(20-\frac{25\pi}{8}\)',
+          r'D. \(14-\frac{5\pi}{2}\)',
+        ],
+        answer: 'A',
+        explanation:
+            r'外边界面积为 \(\frac{2+5}{2}\times4=14\)。左侧斜边平方为 \((5-2)^2+4^2=25\)，所以半圆面积为 \(\frac{25\pi}{8}\)，目标面积为 \(14-\frac{25\pi}{8}\)。',
+        createdAt: now,
+        order: 0,
+        diagramData: _compositeSemicircleDiagram('2', '5', '4'),
+      ),
+      GeneratedExercise(
+        id: 'e2',
+        questionId: questionId,
+        generationMode: ExerciseGenerationMode.practice,
+        difficulty: '同级',
+        question: r'如图，上边长为 3，下边长为 7，右边高为 10，半圆以左侧斜边为直径。求右侧外边界与半圆弧之间区域的面积。',
+        options: const [
+          r'A. \(50-29\pi\)',
+          r'B. \(50-\frac{29\pi}{2}\)',
+          r'C. \(40-\frac{29\pi}{2}\)',
+          r'D. \(50-58\pi\)',
+        ],
+        answer: 'B',
+        explanation:
+            r'外边界面积为 \(\frac{3+7}{2}\times10=50\)。左侧斜边平方为 \((7-3)^2+10^2=116\)，半径平方为 29，半圆面积为 \(\frac{29\pi}{2}\)，目标面积为 \(50-\frac{29\pi}{2}\)。',
+        createdAt: now,
+        order: 1,
+        diagramData: _compositeSemicircleDiagram('3', '7', '10'),
+      ),
+      GeneratedExercise(
+        id: 'e3',
+        questionId: questionId,
+        generationMode: ExerciseGenerationMode.practice,
+        difficulty: '提高',
+        question: r'如图，上边长为 4，下边长为 10，右边高为 8，半圆以左侧斜边为直径。求右侧外边界与半圆弧之间区域的面积。',
+        options: const [
+          r'A. \(56-50\pi\)',
+          r'B. \(48-25\pi\)',
+          r'C. \(56-25\pi\)',
+          r'D. \(56-\frac{25\pi}{2}\)',
+        ],
+        answer: 'D',
+        explanation:
+            r'外边界面积为 \(\frac{4+10}{2}\times8=56\)。左侧斜边平方为 \((10-4)^2+8^2=100\)，半径平方为 25，半圆面积为 \(\frac{25\pi}{2}\)，目标面积为 \(56-\frac{25\pi}{2}\)。',
+        createdAt: now,
+        order: 2,
+        diagramData: _compositeSemicircleDiagram('4', '10', '8'),
+      ),
+    ];
+  }
+
   List<GeneratedExercise> _defaultAnnulusAreaExercises(
     String questionId,
     DateTime now,
@@ -3114,6 +3646,65 @@ class AiAnalysisService {
     };
   }
 
+  Map<String, dynamic> _compositeSemicircleDiagram(
+    String top,
+    String bottom,
+    String height,
+  ) {
+    return <String, dynamic>{
+      'elements': [
+        {
+          'type': 'polygon',
+          'points': [
+            [0.36, 0.16],
+            [0.76, 0.16],
+            [0.76, 0.86],
+            [0.12, 0.86],
+          ],
+          'labels': [
+            {'text': 'A', 'x': 0.35, 'y': 0.1},
+            {'text': 'B', 'x': 0.79, 'y': 0.12},
+            {'text': 'C', 'x': 0.79, 'y': 0.9},
+            {'text': 'D', 'x': 0.09, 'y': 0.9},
+          ],
+        },
+        {'type': 'text', 'text': top, 'x': 0.56, 'y': 0.1, 'role': 'known'},
+        {'type': 'text', 'text': bottom, 'x': 0.44, 'y': 0.94, 'role': 'known'},
+        {'type': 'text', 'text': height, 'x': 0.84, 'y': 0.5, 'role': 'known'},
+        {
+          'type': 'arc',
+          'cx': 0.24,
+          'cy': 0.51,
+          'r': 0.38,
+          'startAngle': -72,
+          'sweepAngle': 180,
+          'filled': false,
+          'role': 'known',
+        },
+        {'type': 'text', 'text': '半圆', 'x': 0.48, 'y': 0.55, 'role': 'label'},
+        {
+          'type': 'text',
+          'text': '求此区域',
+          'x': 0.68,
+          'y': 0.39,
+          'role': 'target',
+        },
+        {'type': 'rightAngle', 'x': 0.76, 'y': 0.86},
+      ],
+      'auxiliaryLines': [
+        {
+          'type': 'line',
+          'x1': 0.36,
+          'y1': 0.16,
+          'x2': 0.12,
+          'y2': 0.86,
+          'style': 'dashed',
+          'role': 'auxiliary',
+        },
+      ],
+    };
+  }
+
   Map<String, dynamic> _rightTriangleDiagram(
     String legA,
     String legB,
@@ -3200,6 +3791,144 @@ class AiAnalysisService {
           'ticks': 1
         },
       ],
+    };
+  }
+
+  List<GeneratedExercise> _defaultSquarePerpendicularBisectorLengthExercises(
+    String questionId,
+    DateTime now,
+  ) {
+    return <GeneratedExercise>[
+      GeneratedExercise(
+        id: 'e1',
+        questionId: questionId,
+        generationMode: ExerciseGenerationMode.practice,
+        difficulty: '简单',
+        question:
+            r'如图，在边长为 \(4\) 的正方形 \(ABCD\) 中，点 \(E\) 是 \(BC\) 的中点，点 \(F\) 在 \(DC\) 上，且 \(F\) 在线段 \(AE\) 的垂直平分线上。求 \(DF\) 的长。',
+        options: const [
+          r'A. \(\frac{1}{2}\)',
+          r'B. \(1\)',
+          r'C. \(\frac{3}{2}\)',
+          r'D. \(2\)',
+        ],
+        answer: 'A',
+        explanation:
+            r'设 \(B(0,0)\)，\(C(4,0)\)，\(D(4,4)\)，\(A(0,4)\)，则 \(E(2,0)\)，设 \(F(4,y)\)。由 \(FA=FE\)，得 \(4^2+(y-4)^2=2^2+y^2\)，解得 \(y=\frac{7}{2}\)，所以 \(DF=4-\frac{7}{2}=\frac{1}{2}\)。',
+        createdAt: now,
+        order: 0,
+        diagramData: _squarePerpendicularBisectorDiagram('4', '求DF'),
+      ),
+      GeneratedExercise(
+        id: 'e2',
+        questionId: questionId,
+        generationMode: ExerciseGenerationMode.practice,
+        difficulty: '同级',
+        question:
+            r'如图，在边长为 \(8\) 的正方形 \(ABCD\) 中，点 \(E\) 是 \(BC\) 的中点，点 \(F\) 在 \(DC\) 上，直线 \(FH\) 垂直平分线段 \(AE\)。求 \(DF\) 的长。',
+        options: const [
+          r'A. \(\frac{1}{2}\)',
+          r'B. \(1\)',
+          r'C. \(2\)',
+          r'D. \(4\)',
+        ],
+        answer: 'B',
+        explanation:
+            r'设 \(B(0,0)\)，\(C(8,0)\)，\(D(8,8)\)，\(A(0,8)\)，则 \(E(4,0)\)，设 \(F(8,y)\)。由 \(FA=FE\)，得 \(8^2+(y-8)^2=4^2+y^2\)，解得 \(y=7\)，所以 \(DF=8-7=1\)。',
+        createdAt: now,
+        order: 1,
+        diagramData: _squarePerpendicularBisectorDiagram('8', '求DF'),
+      ),
+      GeneratedExercise(
+        id: 'e3',
+        questionId: questionId,
+        generationMode: ExerciseGenerationMode.practice,
+        difficulty: '提高',
+        question:
+            r'如图，在边长为 \(6\) 的正方形 \(ABCD\) 中，点 \(E\) 是 \(BC\) 的中点，点 \(F\) 在 \(DC\) 上，且 \(F\) 在线段 \(AE\) 的垂直平分线上。求 \(DF\) 的长。',
+        options: const [
+          r'A. \(\frac{1}{2}\)',
+          r'B. \(\frac{2}{3}\)',
+          r'C. \(\frac{3}{4}\)',
+          r'D. \(\frac{5}{4}\)',
+        ],
+        answer: 'C',
+        explanation:
+            r'设 \(B(0,0)\)，\(C(6,0)\)，\(D(6,6)\)，\(A(0,6)\)，则 \(E(3,0)\)，设 \(F(6,y)\)。由 \(FA=FE\)，得 \(6^2+(y-6)^2=3^2+y^2\)，解得 \(y=\frac{21}{4}\)，所以 \(DF=6-\frac{21}{4}=\frac{3}{4}\)。',
+        createdAt: now,
+        order: 2,
+        diagramData: _squarePerpendicularBisectorDiagram('6', '求DF'),
+      ),
+    ];
+  }
+
+  Map<String, dynamic> _squarePerpendicularBisectorDiagram(
+    String side,
+    String target,
+  ) {
+    return <String, dynamic>{
+      'elements': [
+        {
+          'type': 'polygon',
+          'points': [
+            [0.2, 0.2],
+            [0.2, 0.8],
+            [0.8, 0.8],
+            [0.8, 0.2],
+          ],
+          'labels': [
+            {'text': 'A', 'x': 0.16, 'y': 0.18},
+            {'text': 'B', 'x': 0.16, 'y': 0.84},
+            {'text': 'C', 'x': 0.82, 'y': 0.84},
+            {'text': 'D', 'x': 0.82, 'y': 0.18},
+          ],
+        },
+        {'type': 'point', 'x': 0.5, 'y': 0.8, 'label': 'E', 'role': 'known'},
+        {'type': 'point', 'x': 0.8, 'y': 0.275, 'label': 'F', 'role': 'target'},
+        {
+          'type': 'line',
+          'x1': 0.2,
+          'y1': 0.2,
+          'x2': 0.5,
+          'y2': 0.8,
+          'style': 'solid',
+          'role': 'known'
+        },
+        {
+          'type': 'line',
+          'x1': 0.35,
+          'y1': 0.5,
+          'x2': 0.8,
+          'y2': 0.275,
+          'style': 'solid',
+          'role': 'known'
+        },
+        {'type': 'point', 'x': 0.35, 'y': 0.5, 'label': 'H', 'role': 'label'},
+        {
+          'type': 'text',
+          'text': '边长$side',
+          'x': 0.48,
+          'y': 0.14,
+          'role': 'known'
+        },
+        {
+          'type': 'line',
+          'x1': 0.8,
+          'y1': 0.2,
+          'x2': 0.8,
+          'y2': 0.275,
+          'style': 'solid',
+          'role': 'target'
+        },
+        {
+          'type': 'text',
+          'text': target,
+          'x': 0.86,
+          'y': 0.24,
+          'role': 'target'
+        },
+      ],
+      'auxiliaryLines': [],
     };
   }
 
@@ -3327,6 +4056,9 @@ class AiAnalysisService {
 
     if (profile.domain == _ExerciseDomain.planeGeometryArea &&
         profile.object == _ExerciseObject.circleFamily) {
+      if (profile.variant == _ExerciseVariant.compositeSemicircleArea) {
+        return _defaultCompositeSemicircleAreaExercises(questionId, now);
+      }
       if (profile.variant == _ExerciseVariant.semicircleArea) {
         return _defaultSemicircleAreaExercises(questionId, now);
       }
@@ -3339,6 +4071,13 @@ class AiAnalysisService {
     if (profile.domain == _ExerciseDomain.planeGeometryLength &&
         profile.object == _ExerciseObject.rightTriangle) {
       return _defaultRightTriangleLengthExercises(questionId, now);
+    }
+
+    if (profile.domain == _ExerciseDomain.planeGeometryLength &&
+        profile.object == _ExerciseObject.square &&
+        profile.variant == _ExerciseVariant.squarePerpendicularBisectorLength) {
+      return _defaultSquarePerpendicularBisectorLengthExercises(
+          questionId, now);
     }
 
     if (profile.domain == _ExerciseDomain.algebraEquation &&
@@ -3770,11 +4509,13 @@ class _ConsistencyCheck {
     required this.isSuspicious,
     required this.isUnverifiable,
     required this.note,
+    this.forceManualReview = false,
   });
 
   final bool isSuspicious;
   final bool isUnverifiable;
   final String note;
+  final bool forceManualReview;
 }
 
 class _ConsistencyVerification {

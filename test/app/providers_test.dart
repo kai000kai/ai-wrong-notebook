@@ -121,6 +121,60 @@ Some young people save income, _____ 4 _____ spend most of it on travel.
       expect(result.candidates, hasLength(2));
     });
 
+    test('keeps chemistry synthesis stem with subquestions as one question',
+        () async {
+      const text = '''9. 某治疗胃炎药物的中间体 N，可通过如下合成路线制得。
+A(C6H6) -> B -> D -> E -> F，条件：重排指有机分子中的一个基团迁移到另一个原子上。
+（1）A→B 的反应类型是______。
+（2）按官能团分类，D 的类别是______。
+（3）E 含有醚键，E 的结构简式是______。
+（4）写出符合条件的 F 的同分异构体______。
+（5）F 与 NH2OH 反应生成 G 的过程如下。
+（6）J 含有酰胺键，试剂 a 是______。
+（7）K 与 NaOH 反应得到 L 的化学方程式是______。''';
+
+      final result = await splitter.split(text, subject: Subject.chemistry);
+
+      expect(result.strategy, QuestionSplitStrategy.fallback);
+      expect(result.candidates, hasLength(1));
+      expect(result.candidates.single.text, text);
+    });
+
+    test('keeps math geometry stem with subquestions as one question',
+        () async {
+      const text = '''如图，在正方形 ABCD 中，E 是 BC 的中点，F 在 DC 上，连接 AE、FH。
+（1）证明 FH 垂直平分 AE。
+（2）若正方形边长为 2，求 DF 的长。''';
+
+      final result = await splitter.split(text, subject: Subject.math);
+
+      expect(result.strategy, QuestionSplitStrategy.fallback);
+      expect(result.candidates, hasLength(1));
+    });
+
+    test('keeps physics circuit stem with subquestions as one question',
+        () async {
+      const text = '''如图所示电路中，电源电压保持不变，R1 与滑动变阻器 R2 串联。
+（1）闭合开关后，求电流表示数。
+（2）滑片向右移动时，判断电压表示数如何变化。''';
+
+      final result = await splitter.split(text, subject: Subject.physics);
+
+      expect(result.strategy, QuestionSplitStrategy.fallback);
+      expect(result.candidates, hasLength(1));
+    });
+
+    test('still splits independent numbered chemistry questions', () async {
+      const text = '''1. 写出钠与水反应的化学方程式。
+2. 判断下列离子能否大量共存。
+3. 计算一定量碳酸钙完全分解生成二氧化碳的质量。''';
+
+      final result = await splitter.split(text, subject: Subject.chemistry);
+
+      expect(result.strategy, QuestionSplitStrategy.numbered);
+      expect(result.candidates, hasLength(3));
+    });
+
     test('keeps single question as one candidate when no split markers',
         () async {
       final result = await splitter.split('已知 x^2+1=5，求 x 的值');

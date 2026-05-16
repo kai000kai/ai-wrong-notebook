@@ -74,12 +74,11 @@ class _GeometryDiagramWidgetState extends State<GeometryDiagramWidget>
     return Column(
       children: [
         Container(
-          margin: const EdgeInsets.symmetric(horizontal: 16),
           decoration: BoxDecoration(
-            color: colorScheme.surfaceContainerLowest,
-            borderRadius: BorderRadius.circular(12),
+            color: colorScheme.surface,
+            borderRadius: BorderRadius.circular(14),
             border: Border.all(
-              color: colorScheme.outlineVariant.withValues(alpha: 0.5),
+              color: colorScheme.outlineVariant,
             ),
           ),
           child: AspectRatio(

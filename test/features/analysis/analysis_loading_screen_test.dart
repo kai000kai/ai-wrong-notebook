@@ -224,6 +224,111 @@ void main() {
   });
 
   testWidgets(
+      'loading screen splits existing numbered text before analysis when split result is missing',
+      (tester) async {
+    final settingsRepo = _TestSettingsRepository();
+    final service = TestAiAnalysisService(
+      settingsRepository: settingsRepo,
+      extractionResult: const AiQuestionExtractionResult(
+        extractedQuestionText: '不会被用到',
+        normalizedQuestionText: '不会被用到',
+        subject: Subject.physics,
+      ),
+      analysisResultValue: const AnalysisResult(
+        subject: Subject.math,
+        finalAnswer: '默认答案',
+        steps: <String>['默认步骤'],
+        aiTags: <String>['默认标签'],
+        knowledgePoints: <String>['默认知识点'],
+        mistakeReason: '默认错因',
+        studyAdvice: '默认建议',
+      ),
+      candidateAnalysisResults: const <AnalysisResult>[
+        AnalysisResult(
+          subject: Subject.math,
+          finalAnswer: '第一题答案',
+          steps: <String>['第一题步骤'],
+          aiTags: <String>['第一题标签'],
+          knowledgePoints: <String>['第一题知识点'],
+          mistakeReason: '第一题错因',
+          studyAdvice: '第一题建议',
+        ),
+        AnalysisResult(
+          subject: Subject.math,
+          finalAnswer: '第二题答案',
+          steps: <String>['第二题步骤'],
+          aiTags: <String>['第二题标签'],
+          knowledgePoints: <String>['第二题知识点'],
+          mistakeReason: '第二题错因',
+          studyAdvice: '第二题建议',
+        ),
+        AnalysisResult(
+          subject: Subject.math,
+          finalAnswer: '第三题答案',
+          steps: <String>['第三题步骤'],
+          aiTags: <String>['第三题标签'],
+          knowledgePoints: <String>['第三题知识点'],
+          mistakeReason: '第三题错因',
+          studyAdvice: '第三题建议',
+        ),
+      ],
+    );
+
+    final container = ProviderContainer(
+      overrides: [
+        settingsRepositoryProvider.overrideWithValue(settingsRepo),
+        aiAnalysisServiceProvider.overrideWithValue(service),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    container.read(currentQuestionProvider.notifier).state =
+        QuestionRecord.draft(
+      id: 'q-existing-numbered',
+      imagePath: '/tmp/fake.jpg',
+      subject: Subject.math,
+      recognizedText: '1. 第一题\n2. 第二题\n3. 第三题',
+    );
+
+    final router = GoRouter(
+      initialLocation: '/analysis/loading',
+      routes: <GoRoute>[
+        GoRoute(
+          path: '/analysis/loading',
+          builder: (_, __) => const AnalysisLoadingScreen(),
+        ),
+        GoRoute(
+          path: '/analysis/result',
+          builder: (_, __) => const Scaffold(body: Text('RESULT_SCREEN')),
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(UncontrolledProviderScope(
+      container: container,
+      child: MaterialApp.router(routerConfig: router),
+    ));
+    await tester.pump();
+    await tester.pump();
+    await tester.pumpAndSettle();
+
+    expect(find.text('RESULT_SCREEN'), findsOneWidget);
+    expect(service.extractionCallCount, 0);
+    expect(service.analysisCallCount, 3);
+
+    final updated = container.read(currentQuestionProvider);
+    expect(updated, isNotNull);
+    expect(updated!.splitResult?.strategy, QuestionSplitStrategy.numbered);
+    expect(updated.splitResult?.candidates, hasLength(3));
+    expect(updated.candidateAnalyses, hasLength(3));
+    expect(updated.analysisResult?.finalAnswer, '第一题答案');
+    expect(
+      updated.candidateAnalyses.map((candidate) => candidate.questionText),
+      <String>['1. 第一题', '2. 第二题', '3. 第三题'],
+    );
+  });
+
+  testWidgets(
       'loading screen stores independent candidate analyses when split result has multiple candidates',
       (tester) async {
     final settingsRepo = _TestSettingsRepository();

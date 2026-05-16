@@ -1,3 +1,5 @@
+// ignore_for_file: avoid_print
+
 import 'dart:convert';
 import 'dart:io';
 
@@ -8,16 +10,21 @@ import 'package:flutter_test/flutter_test.dart';
 /// Send the semicircle image directly to gpt-5.4 and gpt-5.5
 /// WITHOUT any Phase 1 text extraction, to see if the two-phase
 /// approach is causing gpt-5.4's calculation error.
-@Timeout(Duration(minutes: 3))
 void main() {
   final apiKey = Platform.environment['AI_TEST_API_KEY'] ??
-      'sk-MNMiaxin1v7bxLsFdxpjgiGhvxJSXt5pjlZCXV8JEIPFhWqg';
+      Platform.environment['AI_API_KEY'];
   const baseUrl = 'https://www.vbcode.io/v1';
 
   final models = ['gpt-5.4', 'gpt-5.5'];
 
   for (final model in models) {
-    test('direct image to $model - semicircle area', timeout: Timeout(Duration(minutes: 3)), () async {
+    test('direct image to $model - semicircle area',
+        timeout: const Timeout(Duration(minutes: 3)), () async {
+      if (apiKey == null || apiKey.isEmpty) {
+        markTestSkipped('Set AI_TEST_API_KEY or AI_API_KEY to run this test.');
+        return;
+      }
+
       final imageFile = File('test/fixtures/semicircle.png');
       expect(imageFile.existsSync(), isTrue,
           reason: 'test/fixtures/semicircle.png must exist');
@@ -45,8 +52,7 @@ void main() {
               'content': [
                 {
                   'type': 'text',
-                  'text':
-                      '请看这张图片，求图中标注"半圆"的半圆面积。请给出详细的计算步骤和最终答案。',
+                  'text': '请看这张图片，求图中标注"半圆"的半圆面积。请给出详细的计算步骤和最终答案。',
                 },
                 {
                   'type': 'image_url',

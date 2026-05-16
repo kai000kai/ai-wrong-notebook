@@ -104,6 +104,20 @@ class _AnalysisLoadingScreenState extends ConsumerState<AnalysisLoadingScreen> {
         ref.read(currentQuestionProvider.notifier).state = working;
       }
 
+      if (!(working.splitResult?.hasMultipleCandidates ?? false)) {
+        final splitSeed = _splitSeedText(working);
+        if (splitSeed.isNotEmpty) {
+          final splitResult = await service.splitQuestionCandidates(
+            text: splitSeed,
+            subjectName: working.subject.name,
+          );
+          if (splitResult.hasMultipleCandidates) {
+            working = working.copyWith(splitResult: splitResult);
+            ref.read(currentQuestionProvider.notifier).state = working;
+          }
+        }
+      }
+
       var candidateSnapshots = <CandidateAnalysisPayload>[];
       CandidateAnalysisPayload? firstSuccessfulCandidate;
       if (working.splitResult?.hasMultipleCandidates ?? false) {
@@ -237,6 +251,14 @@ class _AnalysisLoadingScreenState extends ConsumerState<AnalysisLoadingScreen> {
     return RegExp(
       '如图|图中|图示|下图|上图|左图|右图|根据图|观察图|函数图像|坐标系|电路图|表格|统计图|示意图',
     ).hasMatch(text);
+  }
+
+  String _splitSeedText(QuestionRecord question) {
+    final normalized = question.normalizedQuestionText.trim();
+    if (normalized.isNotEmpty) return normalized;
+    final extracted = question.extractedQuestionText.trim();
+    if (extracted.isNotEmpty) return extracted;
+    return question.correctedText.trim();
   }
 
   @override
